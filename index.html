@@ -82,7 +82,7 @@ button:disabled{opacity:.5;cursor:not-allowed;background:#eef1f0;color:#6b7c78;b
 .help{background:#fffaf0;border-left:4px solid var(--accent);padding:10px 14px;border-radius:6px;margin:12px 0}
 .help:empty{display:none}
 .help pre{margin:8px 0 0;white-space:pre-wrap;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
-.nextrow{display:flex;justify-content:flex-end;margin-top:16px;border-top:1px solid #e3eee9;padding-top:14px}
+.nextrow{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:16px;border-top:1px solid #e3eee9;padding-top:14px}
 table{border-collapse:collapse;width:100%;font-size:.92rem}
 th,td{border-bottom:1px solid #e1ece7;padding:6px 8px;text-align:left;vertical-align:top}
 th{background:#f3f8f6;font-weight:600;color:var(--muted)}
@@ -107,6 +107,9 @@ summary{cursor:pointer;color:var(--brand2);font-weight:600}
 .schools p{color:#d8ece4}
 .schools ul{margin:0;padding-left:1.2em;color:#e8f4ef}
 .schools li{margin:6px 0}
+.copybox{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0}
+.copybox p{margin:0 0 8px;font-weight:600;color:var(--ok)}
+.copybox textarea{font-size:.85rem}
 footer{margin-top:48px;padding:24px 0 36px;color:var(--muted);font-size:.88rem;border-top:1px solid var(--line)}
 footer p{margin:4px 0}
 @media (max-width:720px){
@@ -138,7 +141,6 @@ footer p{margin:4px 0}
     <p class="lead">Desafios guiados para as unidades de algoritmia e programação: o aluno prevê o resultado, executa, investiga, modifica e cria o seu próprio programa, com correção automática e teste de mesa passo a passo.</p>
     <div class="cta">
       <a class="btn btn-primary" href="#lab" id="ctaStart">Experimentar agora</a>
-      
     </div>
   </div>
 </div>
@@ -162,7 +164,8 @@ footer p{margin:4px 0}
       <div><label for="challenge">Desafio</label><select id="challenge"></select></div>
       <button class="b2" id="random" type="button" title="Escolhe um desafio desta unidade que ainda não concluiu">Desafio aleatório</button>
     </div>
-    <div class="progress"><span id="progText"></span><div class="bar" role="progressbar" aria-label="Progresso na unidade" aria-valuemin="0" aria-valuemax="100" id="progBar"><i></i></div><button class="linkbtn" id="reset" type="button">Recomeçar progresso</button></div>
+    <div class="progress"><span id="progText"></span><div class="bar" role="progressbar" aria-label="Progresso na unidade" aria-valuemin="0" aria-valuemax="100" id="progBar"><i></i></div><button class="linkbtn" id="share" type="button">Copiar o meu progresso</button><button class="linkbtn" id="reset" type="button">Recomeçar progresso</button></div>
+    <div class="copybox" id="copybox" hidden><p id="copyMsg"></p><textarea id="copyText" rows="8" readonly></textarea></div>
 
     <article class="card">
       <ol class="steps" id="stages" aria-label="Etapas PRIMM"></ol>
@@ -178,7 +181,7 @@ footer p{margin:4px 0}
         <span class="note" id="solNote">A solução fica disponível depois de pedir as duas pistas.</span>
       </div>
       <div class="help" id="help" aria-live="polite"></div>
-      <div class="nextrow"><button class="b" id="next" type="button">Próxima etapa →</button></div>
+      <div class="nextrow"><button class="linkbtn" id="report" type="button">Encontrei um problema</button><button class="b" id="next" type="button">Próxima etapa →</button></div>
     </article>
   </div>
 </section>
@@ -196,7 +199,6 @@ footer p{margin:4px 0}
     </ol>
   </div>
 </section>
-
 </main>
 
 <footer>
@@ -278,7 +280,7 @@ const Lab = (() => {
 
   /* ---------- Expressões (partilhadas) ---------- */
   const TYPES = { int: 'int', long: 'int', short: 'int', unsigned: 'int', signed: 'int', double: 'double', float: 'double', bool: 'bool', string: 'str', char: 'str', auto: 'auto' };
-  const PSEUDO_RESERVED = new Set(['SE', 'ENTAO', 'SENAO', 'FIMSE', 'ENQUANTO', 'FACA', 'FIMENQUANTO', 'PARA', 'DE', 'ATE', 'PASSO', 'FIMPARA', 'LER', 'LEIA', 'ESCREVER', 'ESCREVA', 'MOSTRAR', 'IMPRIMIR', 'REPETIR', 'FIM', 'INICIO', 'QUE']);
+  const PSEUDO_RESERVED = new Set(['SE', 'ENTAO', 'SENAO', 'FIMSE', 'ENQUANTO', 'FACA', 'FIMENQUANTO', 'PARA', 'DE', 'ATE', 'PASSO', 'FIMPARA', 'LER', 'LEIA', 'ESCREVER', 'ESCREVA', 'MOSTRAR', 'IMPRIMIR', 'REPETIR', 'FIM', 'INICIO', 'QUE', 'FAZER']);
   const isIntT = t => t === 'int' || t === 'bool';
   const isArr = t => typeof t === 'string' && t.startsWith('arr:');
   const Q = s => JSON.stringify(s);
@@ -605,7 +607,11 @@ const Lab = (() => {
         case 'cout': {
           this.next(); const s = [];
           if (!this.isOp('<<')) throw new LabError('Depois de cout usa «<<», por exemplo: cout << x;', L);
-          while (this.eatOp('<<')) { const e = this.parseBin(5); if (isArr(e.type)) throw new LabError('Para mostrar um vetor tens de mostrar cada elemento.', L); s.push(`__out(${e.js},${Q(e.type)});`); }
+          while (this.eatOp('<<')) {
+            if (this.isId('fixed') || this.isId('showpoint') || this.isId('scientific') || this.isId('defaultfloat')) { const m = this.next().v; s.push(`__fmt(${Q(m)});`); continue; }
+            if (this.isId('setprecision')) { this.next(); const a = this.parseArgs(); s.push(`__prec(${a[0] ? a[0].js : 6});`); continue; }
+            if (this.isId('setw')) { this.next(); this.parseArgs(); continue; }
+            const e = this.parseBin(5); if (isArr(e.type)) throw new LabError('Para mostrar um vetor tens de mostrar cada elemento.', L); s.push(`__out(${e.js},${Q(e.type)});`); }
           this.expectOp(';', 'Falta «;» no fim da instrução cout.'); s.push(`__t(${L});`); return s;
         }
       }
@@ -618,7 +624,7 @@ const Lab = (() => {
   }
 
   /* ---------- Pseudocódigo ---------- */
-  const SKIP = new Set(['INICIO', 'FIMALGORITMO', 'ALGORITMO', 'VAR', 'VARIAVEIS', 'INTEIRO', 'REAL', 'LOGICO', 'CARACTER', 'TEXTO', 'DECLARAR', 'ENTAO']);
+  const SKIP = new Set(['INICIO', 'FIMALGORITMO', 'ALGORITMO', 'VAR', 'VARIAVEIS', 'INTEIRO', 'REAL', 'LOGICO', 'CARACTER', 'TEXTO', 'DECLARAR']);
   function closerKind(l) {
     const a = l[0]; if (!a || a.t !== 'id') return null;
     const m = { FIMSE: 'se', FIMENQUANTO: 'enq', FIMPARA: 'para' }[a.k];
@@ -632,7 +638,7 @@ const Lab = (() => {
   function compilePseudo(src) {
     const toks = tokenize(src, 'pseudo');
     const lines = []; let cur = [];
-    for (const t of toks) { if (t.t === 'nl' || t.t === 'eof') { if (cur.length) lines.push(cur); cur = []; } else cur.push(t); }
+    for (const t of toks) { if (t.t === 'nl' || t.t === 'eof') { while (cur.length && cur[cur.length - 1].t === 'op' && cur[cur.length - 1].v === ';') cur.pop(); if (cur.length) lines.push(cur); cur = []; } else cur.push(t); }
     const srcLines = src.split('\n');
     const indentOf = L => { const m = /^[ \t]*/.exec(srcLines[L - 1] || '')[0]; return m.replace(/\t/g, '    ').length; };
     const explicit = lines.some(l => closerKind(l));
@@ -688,6 +694,14 @@ const Lab = (() => {
         closeTop(L); pendingIf = null; continue;
       }
       if (k && SKIP.has(k)) continue;
+      if (k === 'ENTAO') {
+        P.next(); if (P.atEnd()) continue;
+        const top = stack[stack.length - 1];
+        if (!top || top.kind !== 'se') throw new LabError('ENTÃO sem SE correspondente.', L);
+        const s = simpleStmt(P, L);
+        if (P.isKw('SENAO')) { P.next(); const s2 = simpleStmt(P, L); finishLine(P, L); out.push(s + '}else{' + s2); top.kind = 'senao'; top.count = 2; top.entao = true; continue; }
+        finishLine(P, L); out.push(s); top.count++; top.entao = true; continue;
+      }
       if (k === 'FIM' && l.length === 1) continue;
 
       if (k === 'SENAO') {
@@ -721,11 +735,11 @@ const Lab = (() => {
       if (k === 'SE') {
         P.next(); const c = P.parseExpr(); P.eatKw('ENTAO');
         if (P.atEnd()) { out.push(`if(${c.js}){`); stack.push({ kind: 'se', indent: ind, close: '}', count: 0, line: L, label: 'SE' }); }
-        else { const s = simpleStmt(P, L); finishLine(P, L); out.push(`if(${c.js}){${s}}`); pendingIf = { indent: ind }; }
+        else { const s = simpleStmt(P, L); if (P.eatKw('SENAO')) { const s2 = simpleStmt(P, L); finishLine(P, L); out.push(`if(${c.js}){${s}}else{${s2}}`); continue; } finishLine(P, L); out.push(`if(${c.js}){${s}}`); pendingIf = { indent: ind }; }
         continue;
       }
       if (k === 'ENQUANTO') {
-        P.next(); const c = P.parseExpr(); P.eatKw('FACA'); finishLine(P, L);
+        P.next(); const c = P.parseExpr(); P.eatKw('FACA') || P.eatKw('FAZER'); finishLine(P, L);
         out.push(`while(${c.js}){__tick(${L});`); stack.push({ kind: 'enq', indent: ind, close: '}', count: 0, line: L, label: 'ENQUANTO' });
         continue;
       }
@@ -736,7 +750,7 @@ const Lab = (() => {
         if (!P.eatKw('ATE')) throw new LabError('Falta ATÉ no ciclo PARA (exemplo: PARA i DE 1 ATÉ n).', L);
         const b = P.parseExpr();
         let st = { js: '1' }; if (P.eatKw('PASSO')) st = P.parseExpr();
-        P.eatKw('FACA'); finishLine(P, L);
+        P.eatKw('FACA') || P.eatKw('FAZER'); finishLine(P, L);
         const u = ++uid, vb = tg.get.replace(/^__r\(V,("[^"]*"),\d+\)$/, 'V[$1]');
         out.push(`{const __b${u}=${b.js},__p${u}=${st.js};if(__p${u}===0)__err("O PASSO não pode ser 0.",${L});for(${tg.set(a.js)};__p${u}>0?${vb}<=__b${u}:${vb}>=__b${u};${tg.set(vb + '+__p' + u)}){__tick(${L});__t(${L});`);
         stack.push({ kind: 'para', indent: ind, close: '}}', count: 0, line: L, label: 'PARA' });
@@ -765,7 +779,7 @@ const Lab = (() => {
       let body;
       if (lang === 'cpp') { const P = new CppParser(tokenize(src, 'cpp').filter(t => t.t !== 'nl'), 'cpp'); body = P.program(); }
       else body = compilePseudo(src);
-      const code = '"use strict";const {V,__in,__out,__nl,__r,__ix,__set,__arr,__mkarr,__idiv,__fdiv,__mod,__toInt,__tick,__t,__err}=__rt;\n' + body.join('\n');
+      const code = '"use strict";const {V,__fmt,__prec,__in,__out,__nl,__r,__ix,__set,__arr,__mkarr,__idiv,__fdiv,__mod,__toInt,__tick,__t,__err}=__rt;\n' + body.join('\n');
       const fn = new Function('__rt', code);
       return { ok: true, fn, lang, code };
     } catch (e) {
@@ -789,12 +803,15 @@ const Lab = (() => {
       if (!Number.isInteger(i)) E(`O índice de «${name}» tem de ser inteiro.`, L);
       if (i < 0 || i >= arr.length) E(`Índice ${i} fora dos limites de «${name}» (posições válidas: 0 a ${arr.length - 1}).`, L);
     };
+    let fixed = false, prec = 6;
     const rt = {
       V,
+      __fmt: m => { fixed = m === 'fixed'; },
+      __prec: n => { prec = Math.max(0, Math.min(15, n | 0)); },
       __in: L => { if (inp >= inputs.length) E('O programa pede mais valores de entrada do que os fornecidos.', L); return inputs[inp++]; },
       __out: (v, type) => {
         if (typeof v === 'boolean') out += pseudo ? (v ? 'VERDADEIRO' : 'FALSO') : (v ? '1' : '0');
-        else if (typeof v === 'number') out += fmtNum(v);
+        else if (typeof v === 'number') out += (!pseudo && type === 'double') ? (fixed ? v.toFixed(prec) : (Number.isInteger(v) ? String(v) : String(Number(v.toPrecision(Math.max(1, prec)))))) : fmtNum(v);
         else out += String(v);
         if (out.length > 20000) E('O programa escreveu demasiado texto. Talvez um ciclo nunca termine: verifica a condição de paragem.', null);
       },
@@ -851,8 +868,7 @@ const data=[["UC00245 · Desenvolver algoritmos",[{"title":"Total da papelaria",
 /* ===== CONFIGURAÇÃO: altere aqui ===== */
 const CONFIG = {
   marca: 'Laboratório de Programação',
-  autora: 'Alexandra Silva',   // ex.: 'Prof.ª Nome Apelido'  (aparece no rodapé)
-  email: ''     // ex.: 'contacto@exemplo.pt' (ativa o botão «Pedir informações»)
+  autora: 'Alexandra Silva'   // aparece no rodapé
 };
 /* ===================================== */
 
@@ -864,7 +880,7 @@ const CONFIG = {
   const KEY = 'proglab.v1';
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* armazenamento indisponível */ } };
-  let S = load(); S.done = S.done || {}; S.code = S.code || {};
+  let S = load(); S.done = S.done || {}; S.code = S.code || {}; S.stats = S.stats || {};
 
   let u = 0, c = 0, stage = 0, hints = 0, wrong = 0, task, prog, answers = {};
   const key = (a = u, b = c) => a + '-' + b;
@@ -872,6 +888,9 @@ const CONFIG = {
   const doneArr = (k = key()) => (S.done[k] = S.done[k] || [false, false, false, false, false]);
   const isDone = (a, b) => !!(S.done[key(a, b)] && S.done[key(a, b)][4]);
   const modY = () => Math.min(30, task.x + 1);
+  const stat = (k = key()) => (S.stats[k] = S.stats[k] || { tentativas: 0, pistas: 0, solucao: false });
+  const num = s => Number(String(s).trim().replace(',', '.'));
+  let criarTries = 0;
 
   /* ---- marca, rodapé, contacto ---- */
   document.querySelectorAll('[data-brand]').forEach(n => { n.textContent = CONFIG.marca; });
@@ -915,8 +934,8 @@ const CONFIG = {
   function setFeedback(msg, kind) { const f = el('feedback'); f.className = 'feedback' + (kind ? ' ' + kind : ''); f.innerHTML = msg; }
 
   function render() {
-    hints = 0; wrong = 0;
-    el('hint').disabled = false; el('solution').disabled = true; el('solNote').hidden = false;
+    hints = 0; wrong = 0; criarTries = 0;
+    el('hint').disabled = false; el('solution').disabled = true; el('solNote').hidden = false; el('solNote').textContent = stage === 4 ? 'A solução fica disponível depois de tentares pelo menos uma vez e pedires as duas pistas.' : 'A solução fica disponível depois de pedir as duas pistas.';
     setFeedback(''); el('help').innerHTML = ''; el('extra').innerHTML = '';
     el('heading').textContent = task.title + ' · ' + phases[stage];
     el('code').innerHTML = codeHTML(task.code);
@@ -956,7 +975,7 @@ const CONFIG = {
       ta.addEventListener('input', () => { S.code[key()] = ta.value; save(); });
     } else {
       const isRun = stage === 1;
-      W.innerHTML = `<form class="work" id="f"><div class="field"><label for="a">${isRun ? 'Valor de entrada (x)' : 'A tua previsão'}</label><input id="a" type="number" step="any" inputmode="decimal"></div>
+      W.innerHTML = `<form class="work" id="f"><div class="field"><label for="a">${isRun ? 'Valor de entrada (x)' : 'A tua previsão'}</label><input id="a" type="text" inputmode="decimal" autocomplete="off"></div>
         <button class="b" type="submit">${isRun ? 'Executar' : 'Verificar'}</button></form>`;
       el('a').value = answers[stage] ?? (isRun ? task.x : '');
       el('a').oninput = () => { answers[stage] = el('a').value; };
@@ -986,7 +1005,8 @@ const CONFIG = {
     if (!raw) { setFeedback(stage === 4 ? 'Escreve primeiro o teu programa.' : 'Regista primeiro a tua resposta.', 'bad'); return; }
     if (stage === 1) return execute(raw);
     if (stage === 4) return create(raw);
-    const n = Number(raw.replace(',', '.'));
+    const n = num(raw);
+    if (Number.isNaN(n)) { setFeedback('Escreve só um número (por exemplo 12).', 'bad'); return; }
     const expected = task.run[[task.x, null, 0, modY()][stage]];
     if (n === expected) {
       setFeedback('Correto! ✓ ' + (stage === 0 ? 'Confirma na etapa Executar.' : 'Podes avançar para a próxima etapa.'), 'ok');
@@ -998,8 +1018,13 @@ const CONFIG = {
   }
 
   function execute(raw) {
-    const n = Number(raw.replace(',', '.'));
-    const cmp = (answers[0] !== undefined && answers[0] !== '' && n === task.x) ? ` · A tua previsão: ${esc(answers[0])} ${Number(answers[0]) === task.run[task.x] ? '✓' : '✗'}` : '';
+    const n = num(raw);
+    if (Number.isNaN(n)) { setFeedback('Escreve só um número inteiro (por exemplo 4).', 'bad'); return; }
+    if (n === task.x && !doneArr()[0] && (answers[0] === undefined || answers[0] === '')) {
+      setFeedback('Primeiro regista uma previsão na etapa «Prever», mesmo que não tenhas a certeza. Prever antes de executar é o que torna o exercício útil!', 'bad');
+      return;
+    }
+    const cmp = (answers[0] !== undefined && answers[0] !== '' && n === task.x) ? ` · A tua previsão: ${esc(answers[0])} ${num(answers[0]) === task.run[task.x] ? '✓' : '✗'}` : '';
     if (prog.ok) {
       if (!Number.isInteger(n) || Math.abs(n) > 100000) { setFeedback('Usa um número inteiro (até 100 000).', 'bad'); return; }
       const r = Lab.run(prog, [n]);
@@ -1015,6 +1040,8 @@ const CONFIG = {
 
   function create(src) {
     const r = Lab.check(src, lang(), task.tests);
+    criarTries++; if (!doneArr()[4]) { stat().tentativas++; save(); }
+    if (hints >= 2) { el('solution').disabled = false; el('solNote').hidden = true; }
     if (r.compileError) {
       setFeedback((r.line ? 'Linha ' + r.line + ': ' : '') + esc(r.compileError), 'bad');
       el('extra').innerHTML = ''; return;
@@ -1033,10 +1060,12 @@ const CONFIG = {
     const h1 = stage === 4 ? 'Começa por identificar a entrada (LER / cin), o cálculo ou a decisão necessária e a saída (ESCREVER / cout).' : 'Identifica a entrada, a instrução que a utiliza e a saída.';
     const h2 = stage === 4 ? `Parte do programa original e altera apenas o necessário. Atenção a: ${task.concept}.` : `Faz um teste de mesa (podes usar a etapa Executar). Observa especialmente: ${task.concept}.`;
     el('help').innerHTML = '<strong>Pista ' + hints + ':</strong> ' + esc(hints === 1 ? h1 : h1 + ' ' + h2);
-    if (hints >= 2) { el('hint').disabled = true; el('solution').disabled = false; el('solNote').hidden = true; }
+    if (!doneArr()[4]) { stat().pistas++; save(); }
+    if (hints >= 2) { el('hint').disabled = true; if (stage !== 4 || criarTries > 0) { el('solution').disabled = false; el('solNote').hidden = true; } }
   };
   el('solution').onclick = () => {
     if (stage === 4) {
+      if (!doneArr()[4]) { stat().solucao = true; save(); }
       el('help').innerHTML = `<strong>Uma solução possível</strong> (há outras corretas):<pre>${esc(task.solution)}</pre><span class="note">Testes: ${task.tests.map(([a, b]) => a + ' → ' + Lab.fmtNum(b)).join(' · ')}</span>`;
     } else {
       const v = stage === 2 ? 0 : stage === 3 ? modY() : task.x;
@@ -1067,8 +1096,38 @@ const CONFIG = {
       return;
     }
     clearTimeout(resetTimer); resetTimer = null; b.textContent = 'Recomeçar progresso';
-    S = { done: {}, code: {} }; save(); open(u, c);
+    S = { done: {}, code: {}, stats: {} }; save(); open(u, c);
     setFeedback('Progresso apagado.', 'info');
+  };
+
+  function showCopy(text, msg) {
+    const box = el('copybox'), ta = el('copyText');
+    ta.value = text; box.hidden = false;
+    const done = ok => { el('copyMsg').textContent = ok ? msg : 'Seleciona o texto abaixo, copia-o (Ctrl+C) e cola-o numa mensagem para a professora.'; };
+    try { navigator.clipboard.writeText(text).then(() => done(true), () => { ta.select(); done(false); }); } catch (e) { ta.select(); done(false); }
+    box.scrollIntoView({ block: 'nearest' });
+  }
+  el('share').onclick = () => {
+    const lines = ['Laboratório de Programação · resumo do progresso', 'Data: ' + new Date().toLocaleString('pt-PT'), ''];
+    data.forEach(([uname, tasks], i) => {
+      lines.push(uname);
+      tasks.forEach((t, j) => {
+        const d = S.done[key(i, j)] || [], st = S.stats[key(i, j)];
+        const etapas = phases.filter((_, k) => d[k]).map(p => p[0]).join('') || '—';
+        const extra = st ? ` · tentativas no Criar: ${st.tentativas} · pistas: ${st.pistas}${st.solucao ? ' · viu a solução' : ''}` : '';
+        lines.push(`  ${d[4] ? '✓' : '·'} ${t.title} · etapas: ${etapas}${extra}`);
+      });
+      lines.push('');
+    });
+    lines.push('Etapas: P=Prever E=Executar I=Investigar M=Modificar C=Criar');
+    showCopy(lines.join('\n'), 'Resumo copiado ✓ Cola-o numa mensagem para a professora (Teams, Moodle ou email).');
+  };
+  el('report').onclick = () => {
+    const ta = el('a');
+    const text = ['Problema no Laboratório de Programação', 'Unidade: ' + data[u][0], 'Desafio: ' + task.title, 'Etapa: ' + phases[stage],
+      'O que aconteceu: (descreve aqui o problema)', '', 'A minha resposta / código:', ta ? ta.value : '', '', 'Mensagem mostrada: ' + el('feedback').textContent,
+      'Navegador: ' + navigator.userAgent].join('\n');
+    showCopy(text, 'Copiado ✓ Cola numa mensagem para a professora e acrescenta o que aconteceu.');
   };
 
   fillUnits();
