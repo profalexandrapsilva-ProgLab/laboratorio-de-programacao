@@ -107,6 +107,10 @@ summary{cursor:pointer;color:var(--brand2);font-weight:600}
 .schools p{color:#d8ece4}
 .schools ul{margin:0;padding-left:1.2em;color:#e8f4ef}
 .schools li{margin:6px 0}
+.file{margin:0 0 14px}
+.fname{font-size:.85rem;font-weight:600;color:var(--muted);margin-bottom:4px}
+.file pre{margin:0;background:#fffdf5;border:1px dashed #d9c78f;border-radius:8px;padding:10px 14px;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap}
+.filesout{margin-top:10px}
 .copybox{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0}
 .copybox p{margin:0 0 8px;font-weight:600;color:var(--ok)}
 .copybox textarea{font-size:.85rem}
@@ -171,6 +175,7 @@ footer p{margin:4px 0}
       <ol class="steps" id="stages" aria-label="Etapas PRIMM"></ol>
       <h3 id="heading"></h3>
       <pre class="code" id="code" aria-label="Código do desafio"></pre>
+      <div id="files"></div>
       <p class="prompt" id="prompt"></p>
       <div id="work"></div>
       <div class="feedback" id="feedback" role="status" aria-live="polite"></div>
@@ -219,7 +224,7 @@ const Lab = (() => {
 
   /* ---------- Análise léxica ---------- */
   const SYM = { '←': ':=', '×': '*', '÷': '/', '−': '-', '–': '-', '≤': '<=', '≥': '>=', '≠': '!=' };
-  const OPS_CPP = ['<<', '>>', '<=', '>=', '==', '!=', '&&', '||', '++', '--', '+=', '-=', '*=', '/=', '%=', '::'];
+  const OPS_CPP = ['->', '<<', '>>', '<=', '>=', '==', '!=', '&&', '||', '++', '--', '+=', '-=', '*=', '/=', '%=', '::'];
   const OPS_PSEUDO = ['<-', '<>', '<=', '>=', '==', '!=', '&&', '||'];
   function tokenize(src, mode) {
     const ops = mode === 'cpp' ? OPS_CPP : OPS_PSEUDO;
@@ -259,7 +264,8 @@ const Lab = (() => {
       if (c === "'" && mode === 'cpp') {
         const m = /^'(\\?.)'/.exec(src.slice(i));
         if (!m) throw new LabError('Carácter entre plicas inválido.', line);
-        toks.push({ t: 'str', v: m[1] === '\\n' ? '\n' : m[1].replace(/^\\/, ''), line }); i += m[0].length; continue;
+        const ch = m[1] === '\\n' ? '\n' : m[1] === '\\t' ? '\t' : m[1] === '\\0' ? '\0' : m[1].replace(/^\\/, '');
+        toks.push({ t: 'chr', v: ch, line }); i += m[0].length; continue;
       }
       if (/[\p{L}_]/u.test(c)) {
         let j = i; while (j < n && /[\p{L}\p{N}_]/u.test(src[j])) j++;
@@ -436,37 +442,475 @@ const Lab = (() => {
   function show(t) { return t.t === 'eof' || t.t === 'nl' ? 'fim da linha' : String(t.v); }
 
   /* ---------- C++ ---------- */
+  const CPP_TYPES = { int: 'int', long: 'int', short: 'int', unsigned: 'int', signed: 'int', size_t: 'int', double: 'double', float: 'double', bool: 'bool', string: 'str', char: 'char', auto: 'auto', void: 'void', ifstream: 'ifstream', ofstream: 'ofstream', fstream: 'fstream' };
+  const isPtr = t => typeof t === 'string' && t.startsWith('ptr:');
+  const isStruct = t => typeof t === 'string' && t.startsWith('struct:');
+  const isStream = t => t === 'ifstream' || t === 'ofstream' || t === 'fstream';
+  const isNumT = t => t === 'int' || t === 'double' || t === 'bool' || t === 'char' || t === 'any';
+  const CMP = ['==', '!=', '<', '>', '<=', '>='];
+
   class CppParser extends Parser {
+    constructor(toks) {
+      super(toks, 'cpp');
+      this.structs = new Map(); this.funcs = new Map(); this.globals = new Map();
+      this.scope = null; this.hasMain = false; this.fnRet = null; this.curLine = 1;
+    }
+    /* variáveis */
+    declare(name, type, L, ref = false) { const info = { type, ref, global: !this.scope }; (this.scope || this.globals).set(name, info); return info; }
+    lookup(name) { return (this.scope && this.scope.get(name)) || this.globals.get(name) || null; }
+    /* tipos */
+    typeWordAt(k) { const t = this.peek(k); return t.t === 'id' && (!!CPP_TYPES[t.v] || this.structs.has(t.v)); }
+    isTypeStart() { let k = 0; while (this.isId('const', k) || this.isId('static', k) || this.isId('struct', k)) k++; return this.typeWordAt(k); }
     parseType() {
-      while (this.isId('const') || this.isId('static')) this.next();
-      if (this.peek().t !== 'id' || !TYPES[this.peek().v]) return null;
+      while (this.isId('const') || this.isId('static') || this.isId('struct')) this.next();
+      const t = this.peek();
+      if (t.t !== 'id') return null;
+      if (this.structs.has(t.v)) { this.next(); while (this.isId('const')) this.next(); return 'struct:' + t.v; }
+      if (!CPP_TYPES[t.v]) return null;
       const words = [];
-      while (this.peek().t === 'id' && TYPES[this.peek().v]) words.push(this.next().v);
-      if (words.includes('double') || words.includes('float')) return 'double';
-      if (words.includes('bool')) return 'bool';
-      if (words.includes('string')) return 'str';
-      if (words.includes('char')) return 'str';
-      if (words.includes('auto')) return 'auto';
+      while (this.peek().t === 'id' && CPP_TYPES[this.peek().v]) words.push(this.next().v);
+      while (this.isId('const')) this.next();
+      for (const w of ['void', 'double', 'float', 'bool', 'string', 'char', 'auto', 'ifstream', 'ofstream', 'fstream']) if (words.includes(w)) return CPP_TYPES[w];
       return 'int';
     }
-    program() {
-      const out = [];
+    /* valores iniciais */
+    zeroJs(type) {
+      if (type === 'str') return '""'; if (type === 'char') return '"\\0"'; if (type === 'bool') return 'false';
+      if (isPtr(type)) return 'null'; if (isStruct(type)) return this.structJs(type, null, true);
+      return '0';
+    }
+    undefJs(type) { if (type === 'str') return '""'; if (isStruct(type)) return this.structJs(type, null, false); return 'undefined'; }
+    structJs(type, list, zero) {
+      const fields = this.structs.get(type.slice(7));
+      if (list && list.length > fields.length) throw new LabError(`Há mais valores do que campos no registo ${type.slice(7)}.`, this.curLine);
+      return '({' + fields.map((f, i) => {
+        const it = list ? list[i] : undefined;
+        let v;
+        if (f.dims.length) v = this.arrJs(f.type, f.dims, it || null, zero || !!list);
+        else if (it !== undefined) v = this.treeJs(f.type, it);
+        else v = (zero || list) ? this.zeroJs(f.type) : this.undefJs(f.type);
+        return Q(f.name) + ':' + v;
+      }).join(',') + '})';
+    }
+    arrJs(type, dims, tree, zero) {
+      let elem = type; for (let i = 0; i < dims.length; i++) elem = elem.slice(4);
+      const fac = `()=>${(tree || zero) ? this.zeroJs(elem) : this.undefJs(elem)}`;
+      return `__pad(${tree ? this.treeJs(type, tree) : 'null'},[${dims.map(d => d === null ? 'null' : d).join(',')}],${fac},${this.curLine})`;
+    }
+    treeJs(type, tree) {
+      if (isArr(type)) {
+        if (!tree.list) throw new LabError('Um vetor inicializa-se com chavetas, por exemplo {1, 2, 3}.', this.curLine);
+        const el = type.slice(4), base = type.replace(/^(arr:)+/, '');
+        return '[' + tree.list.map(it => (isArr(el) && !it.list) ? this.treeJs(base, it) : this.treeJs(el, it)).join(',') + ']';
+      }
+      if (isStruct(type)) { if (tree.list) return this.structJs(type, tree.list, true); return this.conv(type, tree.expr); }
+      if (tree.list) { if (tree.list.length > 1) throw new LabError('Demasiados valores para uma variável simples.', this.curLine); return tree.list.length ? this.treeJs(type, tree.list[0]) : this.zeroJs(type); }
+      return this.conv(type, tree.expr);
+    }
+    initTree() {
+      if (this.eatOp('{')) {
+        const list = [];
+        while (!this.eatOp('}')) {
+          list.push(this.initTree());
+          if (!this.eatOp(',')) { this.expectOp('}', 'Falta fechar a chaveta «}» da lista de valores.'); break; }
+        }
+        return { list };
+      }
+      return { expr: this.parseExpr() };
+    }
+    /* declarações */
+    declarator(base, L, opts = {}) {
+      this.curLine = L;
+      let type = base, ptr = 0, ref = false;
+      while (this.eatOp('*')) ptr++;
+      if (this.eatOp('&')) ref = true;
+      const nt = this.next();
+      if (nt.t !== 'id' || CPP_TYPES[nt.v] || this.structs.has(nt.v)) throw new LabError('Esperava o nome da variável na declaração.', nt.line);
+      const name = nt.v;
+      for (let i = 0; i < ptr; i++) type = 'ptr:' + type;
+      const dims = [];
+      while (this.eatOp('[')) { dims.push(this.isOp(']') ? null : this.num(this.parseExpr()).js); this.expectOp(']', 'Falta fechar o parêntese reto «]».'); }
+      for (let i = 0; i < dims.length; i++) type = 'arr:' + type;
+      if (opts.field) return { name, type, dims };
+      if (type === 'void') throw new LabError('Uma variável não pode ser do tipo void.', L);
+      const slot = info => `${info.global ? 'G' : 'V'}[${Q(name)}]`;
+      if (isStream(type)) {
+        let args = [];
+        if (this.isOp('(')) args = this.parseArgs();
+        const info = this.declare(name, type, L);
+        return `(${slot(info)}=__fopen(${Q(type)},${args[0] ? args[0].js : 'null'},${args[1] ? args[1].js : 'null'}))`;
+      }
+      if (ref) {
+        if (!this.eatOp('=')) throw new LabError('Uma referência (&) tem de ser inicializada, por exemplo: int &r = x;', L);
+        const e = this.parseExpr();
+        if (!e.lv) throw new LabError('Uma referência tem de se ligar a uma variável.', L);
+        const info = this.declare(name, type, L, true);
+        return `(${slot(info)}=${e.lv.ref})`;
+      }
+      if (dims.length) {
+        let tree = null;
+        if (this.eatOp('=') || this.isOp('{')) tree = this.initTree();
+        if (dims[0] === null && !tree) throw new LabError(`Indica o tamanho do vetor «${name}» ou os seus valores.`, L);
+        const js = this.arrJs(type, dims, tree, false);
+        const info = this.declare(name, type, L);
+        return `(${slot(info)}=${js})`;
+      }
+      let init = null;
+      if (this.eatOp('=') || this.isOp('{')) init = this.initTree();
+      else if (this.isOp('(') && !isStruct(type)) { this.next(); init = { expr: this.parseExpr() }; this.expectOp(')'); }
+      if (type === 'auto') {
+        if (!init || init.list) throw new LabError('Uma variável auto precisa de um valor inicial.', L);
+        const t = init.expr.type; type = t === 'any' ? 'double' : isArr(t) ? 'ptr:' + t.slice(4) : t;
+      }
+      const js = init ? this.treeJs(type, init) : this.undefJs(type);
+      const info = this.declare(name, type, L);
+      return `(${slot(info)}=${js})`;
+    }
+    declaration(base, L) { const ex = []; do ex.push(this.declarator(base, L)); while (this.eatOp(',')); return ex; }
+    structDef() {
+      const nt = this.next(), name = nt.v;
+      this.structs.set(name, []);
+      this.expectOp('{');
+      const fields = [];
+      while (!this.eatOp('}')) {
+        const L = this.peek().line, base = this.parseType();
+        if (!base) throw new LabError('Esperava o tipo do campo (por exemplo: int nota;).', L);
+        do fields.push(this.declarator(base, L, { field: true })); while (this.eatOp(','));
+        this.expectOp(';', 'Falta «;» no fim da declaração do campo.');
+      }
+      this.expectOp(';', 'Falta «;» depois da chaveta que fecha a struct.');
+      this.structs.set(name, fields);
+    }
+    /* funções */
+    parseParams() {
+      this.expectOp('(', 'Faltam os parênteses dos parâmetros.');
+      const ps = [];
+      if (this.isId('void') && this.isOp(')', 1)) this.next();
+      if (!this.eatOp(')')) {
+        do {
+          const L = this.peek().line, base = this.parseType();
+          if (!base) throw new LabError('Esperava o tipo do parâmetro (por exemplo: int n).', L);
+          let type = base, ref = false;
+          while (this.eatOp('*')) type = 'ptr:' + type;
+          if (this.eatOp('&')) ref = true;
+          const nt = (this.isOp(',') || this.isOp(')') || this.isOp('[')) ? { t: 'id', v: '__p' + ps.length } : this.next();
+          if (nt.t !== 'id') throw new LabError('Esperava o nome do parâmetro.', L);
+          let nd = 0;
+          while (this.eatOp('[')) { while (!this.isOp(']') && this.peek().t !== 'eof') this.next(); this.expectOp(']'); nd++; }
+          for (let i = 0; i < nd; i++) type = 'arr:' + type;
+          ps.push({ name: nt.v, type, ref: ref && !isArr(type) });
+        } while (this.eatOp(','));
+        this.expectOp(')', 'Falta fechar o parêntese dos parâmetros.');
+      }
+      return ps;
+    }
+    looksLikeFunc(ty) { return !isStream(ty) && this.peek().t === 'id' && this.isOp('(', 1) && (this.isOp(')', 2) || this.typeWordAt(2) || this.isId('const', 2) || this.isId('struct', 2)); }
+    prescan() {
+      const save = this.p; let depth = 0;
       while (this.peek().t !== 'eof') {
-        if (this.isId('using')) { while (this.peek().t !== 'eof' && !this.eatOp(';')) this.next(); continue; }
-        const save = this.p, L = this.peek().line;
-        const ty = this.parseType();
-        if (ty && this.peek().t === 'id' && this.isOp('(', 1)) {
-          const fname = this.next().v;
-          if (fname !== 'main') throw new LabError(`Funções além de main() (como «${fname}») ainda não são suportadas pelo verificador.`, L);
-          this.next(); while (this.peek().t !== 'eof' && !this.eatOp(')')) this.next();
-          this.expectOp('{', 'Falta a chaveta «{» depois de main().');
-          out.push(...this.blockBody());
+        const t = this.peek();
+        if (t.t === 'op' && t.v === '{') { depth++; this.p++; continue; }
+        if (t.t === 'op' && t.v === '}') { depth--; this.p++; continue; }
+        if (depth === 0 && this.isId('struct') && this.peek(1).t === 'id' && this.isOp('{', 2)) { this.structs.set(this.peek(1).v, []); this.p += 2; continue; }
+        if (depth === 0 && this.isTypeStart()) {
+          const s2 = this.p; const ty = this.parseType(); let ptr = 0;
+          while (this.eatOp('*')) ptr++;
+          this.eatOp('&');
+          if (ty && this.looksLikeFunc(ty)) {
+            const name = this.next().v;
+            if (name === 'main') this.hasMain = true;
+            else { let ret = ty; for (let i = 0; i < ptr; i++) ret = 'ptr:' + ret; try { this.funcs.set(name, { ret, params: this.parseParams() }); } catch (e) { /* tratado na 2.ª passagem */ } }
+            continue;
+          }
+          this.p = Math.max(s2 + 1, this.p); continue;
+        }
+        this.p++;
+      }
+      this.p = save;
+    }
+    funcDef(ret, name, L) {
+      const params = this.parseParams();
+      if (this.eatOp(';')) return '';
+      this.expectOp('{', 'Falta a chaveta «{» no início da função.');
+      const prevScope = this.scope, prevRet = this.fnRet;
+      this.scope = new Map(); this.fnRet = ret;
+      const bind = params.map((p, i) => { this.declare(p.name, p.type, L, p.ref); return `V[${Q(p.name)}]=__a[${i}];`; }).join('');
+      const body = this.blockBody();
+      this.scope = prevScope; this.fnRet = prevRet;
+      return `function __fn_${name}(...__a){__enter(${L});try{const V=Object.create(null);${bind}__t(${L},V);\n${body.join('\n')}\n}finally{__leave();}}`;
+    }
+    callJs(name, L) {
+      const f = this.funcs.get(name), args = this.parseArgs();
+      if (args.length !== f.params.length) throw new LabError(`A função «${name}» precisa de ${f.params.length} argumento(s) e recebeu ${args.length}.`, L);
+      const js = args.map((a, i) => {
+        const p = f.params[i];
+        if (p.ref) { if (!a.lv) throw new LabError(`O parâmetro «${p.name}» de «${name}» é por referência (&): tens de passar uma variável.`, L); if (a.type !== p.type && !(p.type === 'int' && a.type === 'any')) throw new LabError(`O parâmetro «${p.name}» de «${name}» espera uma variável do tipo ${tname(p.type)}.`, L); return a.lv.ref; }
+        if (isArr(p.type)) { if (!isArr(a.type)) throw new LabError(`O parâmetro «${p.name}» de «${name}» espera um vetor.`, L); return a.js; }
+        return this.conv(p.type, a);
+      });
+      return { js: `__fn_${name}(${js.join(',')})`, type: f.ret, call: true };
+    }
+    /* expressões */
+    mk(lv, type) { return { js: lv.get, type, lv }; }
+    lvVar(name, info, L) {
+      const base = info.global ? 'G' : 'V', raw = `__r(${base},${Q(name)},${L})`;
+      if (info.ref) return { get: `__dget(${raw},${L})`, set: v => `__dset(${raw},${v},${L})`, ref: raw };
+      return { get: raw, set: v => `(${base}[${Q(name)}]=${v})`, ref: `__mkref(${base},${Q(name)})` };
+    }
+    lvIdx(c, i, L) { return { get: `__ixv(${c},${i},${L})`, set: v => `__setv(${c},${i},${v},${L})`, ref: `__ptr(${c},${i},${L})` }; }
+    lvStr(c, i, L, baseLv) {
+      return { get: `__ixs(${c},${i},${L})`, set: v => { if (!baseLv) throw new LabError('Não é possível alterar este texto.', L); return baseLv.set(`__strset(${c},${i},${v},${L})`); }, ref: `__err("Não é possível obter o endereço de um carácter de uma string neste verificador.",${L})` };
+    }
+    lvField(o, f, L) { return { get: `__getf(${o},${Q(f)},${L})`, set: v => `__setf(${o},${Q(f)},${v})`, ref: `__fref(${o},${Q(f)})` }; }
+    lvDeref(p, L) { return { get: `__dget(${p},${L})`, set: v => `__dset(${p},${v},${L})`, ref: p }; }
+    num(e) { return e.type === 'char' ? { js: `__ord(${e.js})`, type: 'int' } : e; }
+    cond(e) {
+      if (isStream(e.type)) return `__sok(${e.js})`;
+      if (isPtr(e.type) || e.type === 'null') return `(${e.js}!=null)`;
+      if (e.type === 'str' || isArr(e.type) || isStruct(e.type)) throw new LabError('Esta condição não é um valor lógico (verdadeiro/falso).', this.peek().line);
+      return e.js;
+    }
+    conv(type, e) {
+      const L = this.peek().line, t = e.type;
+      if (type === 'any' || t === 'any') return e.js;
+      if (t === 'void') throw new LabError('Esta função não devolve nenhum valor (é void).', L);
+      if (isArr(type)) throw new LabError('Não é possível atribuir um vetor inteiro de uma vez: copia elemento a elemento.', L);
+      if (isStruct(type)) { if (t !== type) throw new LabError(`Esperava um valor do tipo ${type.slice(7)}.`, L); return `__clone(${e.js})`; }
+      if (isPtr(type)) {
+        if (t === 'null' || t === type) return e.js;
+        if (isArr(t) && type === 'ptr:' + t.slice(4)) return `__ptr(${e.js},0,${L})`;
+        if (isPtr(t)) throw new LabError('Os apontadores apontam para tipos diferentes.', L);
+        throw new LabError('Um apontador só pode guardar um endereço (por exemplo &x) ou nullptr.', L);
+      }
+      if (isStream(type)) throw new LabError('Não é possível copiar um ficheiro.', L);
+      if (type === 'str') { if (t === 'str' || t === 'char') return e.js; throw new LabError('Para guardar um número numa string usa to_string(...).', L); }
+      if (t === 'str') throw new LabError('Não é possível guardar texto numa variável numérica (usa stoi(...) para converter).', L);
+      if (isArr(t) || isStruct(t) || isPtr(t) || isStream(t) || t === 'null' || t === 'mode') throw new LabError('Os tipos desta atribuição são incompatíveis.', L);
+      if (type === 'char') return t === 'char' ? e.js : `__chr(${e.js})`;
+      if (type === 'int') return t === 'int' ? e.js : t === 'char' ? `__ord(${e.js})` : t === 'bool' ? `(+${e.js})` : `__toInt(${e.js})`;
+      if (type === 'double') return t === 'char' ? `__ord(${e.js})` : t === 'bool' ? `(+${e.js})` : e.js;
+      if (type === 'bool') return `__truth(${e.js})`;
+      return e.js;
+    }
+    cast(ty, e, L) {
+      if (ty === 'void' || isStream(ty)) throw new LabError('Conversão inválida.', L);
+      return { js: this.conv(ty, e), type: ty };
+    }
+    binInfo(t) {
+      if (t.t === 'op' && (t.v === '<<' || t.v === '>>')) return { op: t.v, prec: 4.5 };
+      return super.binInfo(t);
+    }
+    parseBin(min) { return this.parseBinFrom(this.parseUnary(), min); }
+    parseBinFrom(left, min) {
+      for (;;) {
+        const t = this.peek(), info = this.binInfo(t);
+        if (!info || info.prec < min) break;
+        this.p++;
+        left = this.combine(info.op, left, this.parseBin(info.prec + 1), t.line);
+      }
+      return left;
+    }
+    parseExpr() {
+      const c = this.parseBin(1);
+      if (this.eatOp('?')) {
+        const a = this.parseExpr(); this.expectOp(':'); const b = this.parseExpr();
+        const type = a.type === b.type ? a.type : (isNumT(a.type) && isNumT(b.type)) ? 'double' : a.type;
+        return { js: `(${this.cond(c)}?${a.js}:${b.js})`, type };
+      }
+      return c;
+    }
+    combine(op, a, b, L) {
+      if (op === '>>' || op === '<<') {
+        if (op === '>>' && (a.type === 'ifstream' || a.type === 'fstream')) { if (!b.lv) throw new LabError('Depois de «>>» indica a variável onde guardar o valor lido.', L); return { js: `__sin(${a.js},${b.lv.ref},${Q(b.type)},${L})`, type: a.type }; }
+        if (op === '<<' && (a.type === 'ofstream' || a.type === 'fstream')) return { js: `__sout(${a.js},${b.js},${Q(b.type)})`, type: a.type };
+        throw new LabError('Os operadores << e >> só são suportados com cout, cin e ficheiros.', L);
+      }
+      if (op === '||' || op === '&&') return { js: `(${this.cond(a)}${op}${this.cond(b)})`, type: 'bool' };
+      if (isPtr(a.type) || isPtr(b.type) || a.type === 'null' || b.type === 'null' || (isArr(a.type) && (op === '+' || op === '-') && isNumT(b.type))) {
+        const A = isArr(a.type) ? { js: `__ptr(${a.js},0,${L})`, type: 'ptr:' + a.type.slice(4) } : a;
+        const B = isArr(b.type) ? { js: `__ptr(${b.js},0,${L})`, type: 'ptr:' + b.type.slice(4) } : b;
+        if ((op === '+' || op === '-') && isPtr(A.type) && isIntT(this.num(B).type)) return { js: `__padd(${A.js},${op === '-' ? '-' : ''}(${this.num(B).js}),${L})`, type: A.type };
+        if (op === '+' && isPtr(B.type) && isIntT(this.num(A).type)) return { js: `__padd(${B.js},${this.num(A).js},${L})`, type: B.type };
+        if (op === '-' && isPtr(A.type) && isPtr(B.type)) return { js: `__pdiff(${A.js},${B.js},${L})`, type: 'int' };
+        if (op === '==' || op === '!=') return { js: `(${op === '!=' ? '!' : ''}__peq(${A.js},${B.js}))`, type: 'bool' };
+        if (['<', '>', '<=', '>='].includes(op) && isPtr(A.type) && isPtr(B.type)) return { js: `(__pdiff(${A.js},${B.js},${L})${op}0)`, type: 'bool' };
+        throw new LabError('Operação inválida com apontadores.', L);
+      }
+      if (isStruct(a.type) || isStruct(b.type)) throw new LabError('Não é possível fazer esta operação com um registo inteiro: usa um campo (por exemplo a.nota).', L);
+      if (isStream(a.type) || isStream(b.type)) throw new LabError('Operação inválida com um ficheiro.', L);
+      if (a.type === 'str' || b.type === 'str') {
+        const textual = ['str', 'char'].includes(a.type) && ['str', 'char'].includes(b.type);
+        if (op === '+') { if (!textual) throw new LabError('Para juntar um número a texto usa to_string(...).', L); return { js: `(${a.js}+${b.js})`, type: 'str' }; }
+        if (CMP.includes(op)) { if (!textual) throw new LabError('Não é possível comparar texto com números.', L); return { js: `(${a.js}${op}${b.js})`, type: 'bool' }; }
+        throw new LabError('Operação inválida com texto.', L);
+      }
+      if (a.type === 'char' && b.type === 'char' && CMP.includes(op)) return { js: `(${a.js}${op}${b.js})`, type: 'bool' };
+      if ((a.type === 'void') || (b.type === 'void')) throw new LabError('Esta função não devolve nenhum valor (é void).', L);
+      return super.combine(op, this.num(a), this.num(b), L);
+    }
+    parseUnary() {
+      const t = this.peek(), L = t.line;
+      if (t.t === 'op') {
+        if (t.v === '-' || t.v === '+') { this.p++; const e = this.num(this.parseUnary()); if (!isNumT(e.type)) throw new LabError('O sinal só se aplica a números.', L); return { js: t.v === '-' ? `(-${e.js})` : `(+${e.js})`, type: e.type === 'bool' ? 'int' : e.type }; }
+        if (t.v === '!') { this.p++; const e = this.parseUnary(); return { js: `(!${this.cond(e)})`, type: 'bool' }; }
+        if (t.v === '&') {
+          this.p++; const e = this.parseUnary();
+          if (!e.lv) throw new LabError('«&» só se aplica a variáveis (por exemplo &x).', L);
+          if (isArr(e.type)) return { js: `__ptr(${e.js},0,${L})`, type: 'ptr:' + e.type.slice(4) };
+          return { js: e.lv.ref, type: 'ptr:' + e.type };
+        }
+        if (t.v === '*') {
+          this.p++; const e = this.parseUnary();
+          const P = isArr(e.type) ? { js: `__ptr(${e.js},0,${L})`, type: 'ptr:' + e.type.slice(4) } : e;
+          if (!isPtr(P.type)) throw new LabError('«*» (conteúdo) só se aplica a apontadores.', L);
+          return this.mk(this.lvDeref(P.js, L), P.type.slice(4));
+        }
+        if (t.v === '++' || t.v === '--') throw new LabError('Usa ++ e -- numa instrução à parte (por exemplo: i++;).', L);
+        if (t.v === '(' && this.peek(1).t === 'id' && CPP_TYPES[this.peek(1).v] && this.isOp(')', 2)) { this.next(); const ty = CPP_TYPES[this.next().v]; this.next(); return this.cast(ty, this.parseUnary(), L); }
+      }
+      if (this.isId('new')) {
+        this.next(); const ty = this.parseType();
+        if (!ty || ty === 'void') throw new LabError('Depois de new indica o tipo, por exemplo: new int[n].', L);
+        let n = null;
+        if (this.eatOp('[')) { n = this.num(this.parseExpr()); this.expectOp(']'); }
+        return { js: `__new(()=>${this.undefJs(ty)},${n ? n.js : 'null'},${L})`, type: 'ptr:' + ty };
+      }
+      return this.parsePostfix(this.parsePrimary());
+    }
+    parsePrimary() {
+      const t = this.next(), L = t.line;
+      if (t.t === 'num') return { js: t.v, type: t.real ? 'double' : 'int' };
+      if (t.t === 'str') return { js: Q(t.v), type: 'str' };
+      if (t.t === 'chr') return { js: Q(t.v), type: 'char' };
+      if (t.t === 'op' && t.v === '(') { const e = this.parseExpr(); this.expectOp(')', 'Falta fechar um parêntese «)».'); return Object.assign({}, e, { js: `(${e.js})` }); }
+      if (t.t !== 'id') throw new LabError('Expressão incompleta ou inválida perto de «' + show(t) + '».', L);
+      const v = t.v;
+      if (v === 'true' || v === 'false') return { js: v, type: 'bool' };
+      if (v === 'nullptr' || v === 'NULL') return { js: 'null', type: 'null' };
+      if (v === 'endl') return { js: '"\\n"', type: 'str' };
+      if (v === 'string' && this.isOp('::') && this.isId('npos', 1)) { this.p += 2; return { js: '-1', type: 'int' }; }
+      if (v === 'ios' && this.isOp('::')) { this.next(); return { js: Q(this.next().v), type: 'mode' }; }
+      if (v === 'static_cast') {
+        this.expectOp('<'); const ty = this.parseType(); if (!ty) throw new LabError('Tipo desconhecido em static_cast.', L);
+        this.expectOp('>'); this.expectOp('('); const e = this.parseExpr(); this.expectOp(')'); return this.cast(ty, e, L);
+      }
+      if (this.funcs.has(v) && this.isOp('(')) return this.callJs(v, L);
+      if (this.isOp('(')) {
+        const M = { sqrt: 'Math.sqrt', pow: 'Math.pow', abs: 'Math.abs', fabs: 'Math.abs', floor: 'Math.floor', ceil: 'Math.ceil', round: 'Math.round', max: 'Math.max', min: 'Math.min' };
+        if (M[v]) {
+          const args = this.parseArgs().map(a => this.num(a));
+          const intRes = ['abs', 'max', 'min'].includes(v) && args.every(a => isIntT(a.type));
+          return { js: `${M[v]}(${args.map(a => a.js).join(',')})`, type: intRes ? 'int' : 'double' };
+        }
+        if (v === 'toupper' || v === 'tolower') { const a = this.parseArgs(); return { js: `__ord(__chr(${this.num(a[0]).js}).${v === 'toupper' ? 'toUpperCase' : 'toLowerCase'}())`, type: 'int' }; }
+        if (['isalpha', 'isdigit', 'isupper', 'islower', 'isspace', 'isalnum', 'ispunct'].includes(v)) { const a = this.parseArgs(); return { js: `__ctype(${Q(v)},${this.num(a[0]).js})`, type: 'bool' }; }
+        if (v === 'to_string') { const a = this.parseArgs(); return { js: `__tostr(${this.num(a[0]).js},${a[0].type === 'double'})`, type: 'str' }; }
+        if (v === 'stoi' || v === 'stod') { const a = this.parseArgs(); return { js: `__stonum(${a[0].js},${v === 'stoi'},${L})`, type: v === 'stoi' ? 'int' : 'double' }; }
+        if (v === 'getline') {
+          this.next();
+          let s;
+          if (this.isId('cin')) { this.next(); s = { js: 'null', type: 'ifstream' }; } else s = this.parseExpr();
+          this.expectOp(',', 'getline precisa de dois argumentos: getline(ficheiro, texto).');
+          const tg = this.parseUnary(); this.expectOp(')');
+          if (!tg.lv || tg.type !== 'str') throw new LabError('O segundo argumento de getline tem de ser uma variável string.', L);
+          return { js: `__getline(${s.js},${tg.lv.ref},${L})`, type: 'ifstream', call: true };
+        }
+        if (v === 'printf' || v === 'scanf') throw new LabError('Usa cin e cout: printf e scanf não são suportados pelo verificador.', L);
+      }
+      const info = this.lookup(v);
+      if (!info) {
+        if (this.isOp('(')) throw new LabError(`A função «${v}» não existe ou não é suportada pelo verificador.`, L);
+        throw new LabError(`A variável «${v}» não foi declarada (por exemplo: int ${v};).`, L);
+      }
+      return this.mk(this.lvVar(v, info, L), info.type);
+    }
+    parsePostfix(e) {
+      for (;;) {
+        const L = this.peek().line;
+        if (this.eatOp('[')) {
+          const i = this.num(this.parseExpr()); this.expectOp(']', 'Falta fechar o parêntese reto «]».');
+          if (isArr(e.type)) e = this.mk(this.lvIdx(e.js, i.js, L), e.type.slice(4));
+          else if (e.type === 'str') e = this.mk(this.lvStr(e.js, i.js, L, e.lv), 'char');
+          else if (isPtr(e.type)) e = this.mk(this.lvDeref(`__padd(${e.js},${i.js},${L})`, L), e.type.slice(4));
+          else throw new LabError('Só é possível usar [ ] com vetores, strings e apontadores.', L);
           continue;
         }
-        this.p = save;
-        out.push(...this.stmt());
+        if (this.isOp('.') || this.isOp('->')) {
+          const arrow = this.next().v === '->';
+          let obj = e;
+          if (arrow) { if (!isPtr(e.type)) throw new LabError('«->» só se usa com apontadores para registos.', L); obj = this.mk(this.lvDeref(e.js, L), e.type.slice(4)); }
+          const m = this.next();
+          if (m.t !== 'id') throw new LabError('Esperava o nome de um campo ou função depois de «.».', L);
+          if (isStruct(obj.type)) {
+            const f = this.structs.get(obj.type.slice(7)).find(f => f.name === m.v);
+            if (!f) throw new LabError(`O registo ${obj.type.slice(7)} não tem o campo «${m.v}».`, L);
+            e = this.mk(this.lvField(obj.js, m.v, L), f.type); continue;
+          }
+          if (obj.type === 'str') { e = this.strMethod(obj, m.v, L); continue; }
+          if (isStream(obj.type)) { e = this.streamMethod(obj, m.v, L); continue; }
+          throw new LabError(`Não é possível usar «.${m.v}» com este valor.`, L);
+        }
+        return e;
       }
-      return out;
+    }
+    strMethod(s, m, L) {
+      if (!this.isOp('(')) throw new LabError(`Falta «()» depois de ${m}.`, L);
+      const a = this.parseArgs();
+      switch (m) {
+        case 'length': case 'size': return { js: `${s.js}.length`, type: 'int' };
+        case 'empty': return { js: `(${s.js}.length===0)`, type: 'bool' };
+        case 'substr': return { js: `__substr(${s.js},${a[0] ? this.num(a[0]).js : 0},${a[1] ? this.num(a[1]).js : 'null'},${L})`, type: 'str' };
+        case 'find': return { js: `${s.js}.indexOf(${a[0].js})`, type: 'int' };
+        case 'at': return this.mk(this.lvStr(s.js, this.num(a[0]).js, L, s.lv), 'char');
+        case 'push_back': case 'append': if (!s.lv) break; return { js: s.lv.set(`(${s.js}+${a[0].js})`), type: 'void', call: true };
+        case 'pop_back': if (!s.lv) break; return { js: s.lv.set(`${s.js}.slice(0,-1)`), type: 'void', call: true };
+        case 'clear': if (!s.lv) break; return { js: s.lv.set('""'), type: 'void', call: true };
+      }
+      throw new LabError(`A função de string «${m}» não é suportada pelo verificador.`, L);
+    }
+    streamMethod(s, m, L) {
+      if (!this.isOp('(')) throw new LabError(`Falta «()» depois de ${m}.`, L);
+      const a = this.parseArgs();
+      const types = { open: 'void', close: 'void', is_open: 'bool', eof: 'bool', fail: 'bool', good: 'bool' };
+      if (!types[m]) throw new LabError(`A função de ficheiro «${m}» não é suportada pelo verificador.`, L);
+      return { js: `__fm(${s.js},${Q(m)},[${a.map(x => x.js).join(',')}],${L})`, type: types[m], call: true };
+    }
+    /* instruções */
+    program() {
+      this.prescan();
+      const fns = [], pre = [], body = [];
+      if (!this.hasMain) this.scope = new Map();
+      while (this.peek().t !== 'eof') {
+        if (this.isId('using')) { while (this.peek().t !== 'eof' && !this.eatOp(';')) this.next(); continue; }
+        if (this.isId('struct') && this.peek(1).t === 'id' && this.isOp('{', 2)) { this.next(); this.structDef(); continue; }
+        const save = this.p, L = this.peek().line;
+        if (this.isTypeStart()) {
+          let ty = this.parseType(), ptr = 0;
+          while (this.eatOp('*')) ptr++;
+          this.eatOp('&');
+          if (this.looksLikeFunc(ty)) {
+            const name = this.next().v;
+            if (name === 'main') {
+              this.parseParams();
+              if (this.eatOp(';')) continue;
+              this.expectOp('{', 'Falta a chaveta «{» depois de main().');
+              this.scope = new Map(); this.fnRet = null;
+              body.push(...this.blockBody());
+              this.scope = null;
+              continue;
+            }
+            for (let i = 0; i < ptr; i++) ty = 'ptr:' + ty;
+            const f = this.funcDef(ty, name, L); if (f) fns.push(f);
+            continue;
+          }
+          this.p = save;
+        }
+        if (this.hasMain) {
+          if (!this.isTypeStart()) throw new LabError('Fora das funções só podem existir declarações: as instruções vão dentro de main().', L);
+          pre.push(...this.stmt());
+        } else body.push(...this.stmt());
+      }
+      return [...fns, ...pre, ...body];
     }
     blockBody() {
       const out = [];
@@ -476,152 +920,133 @@ const Lab = (() => {
       }
       return out;
     }
-    declaration(ty) { // devolve lista de expressões JS; não consome «;»
-      const exprs = [];
-      do {
-        const nt = this.next();
-        if (nt.t !== 'id' || TYPES[nt.v]) throw new LabError('Esperava o nome da variável na declaração.', nt.line);
-        const name = nt.v, L = nt.line;
-        if (this.eatOp('[')) {
-          let size = null;
-          if (!this.isOp(']')) size = this.parseExpr();
-          this.expectOp(']');
-          let list = null;
-          if (this.eatOp('=') || this.isOp('{')) {
-            this.expectOp('{', 'Um vetor inicializa-se com chavetas, por exemplo {1, 2, 3}.'); list = [];
-            if (!this.eatOp('}')) { do { if (this.isOp('}')) break; list.push(this.parseExpr()); } while (this.eatOp(',')); this.expectOp('}'); }
-          }
-          if (!size && !list) throw new LabError(`Indica o tamanho do vetor «${name}» ou os seus valores.`, L);
-          const base = ty === 'auto' ? 'int' : ty;
-          this.types.set(name, 'arr:' + base);
-          exprs.push(`(V[${Q(name)}]=__mkarr(${list ? '[' + list.map(e => this.conv(base, e)).join(',') + ']' : 'null'},${size ? size.js : 'null'},${L}))`);
-        } else {
-          let init = null;
-          if (this.eatOp('=')) init = this.parseExpr();
-          else if (this.isOp('{')) { this.next(); init = this.isOp('}') ? { js: '0', type: 'int' } : this.parseExpr(); this.expectOp('}'); }
-          let t2 = ty;
-          if (ty === 'auto') { if (!init) throw new LabError('Uma variável auto precisa de valor inicial.', L); t2 = init.type === 'any' ? 'double' : init.type; }
-          this.types.set(name, t2);
-          if (init && isArr(init.type)) throw new LabError('Não é possível copiar um vetor desta forma.', L);
-          exprs.push(`(V[${Q(name)}]=${init ? this.conv(t2, init) : 'undefined'})`);
-        }
-      } while (this.eatOp(','));
-      return exprs;
-    }
-    simple() { // atribuição / incremento como expressão
+    simple() {
       const t = this.peek(), L = t.line;
-      if (t.t === 'op' && (t.v === '++' || t.v === '--')) {
-        this.next(); const tg = this.parseTarget();
-        return tg.set(this.conv(tg.type, this.combine(t.v === '++' ? '+' : '-', { js: tg.get, type: tg.type }, { js: '1', type: 'int' }, L)));
-      }
-      if (t.t === 'id' && (t.v === 'system' || t.v === 'getchar' || (t.v === 'cin' && this.isOp('.', 1)))) { // ignorar
-        while (!this.isOp(';') && this.peek().t !== 'eof') this.next();
-        return 'void 0';
-      }
-      const tg = this.parseTarget();
-      const op = this.peek();
+      if (t.t === 'op' && (t.v === '++' || t.v === '--')) { this.next(); return this.incdec(this.parseUnary(), t.v, L); }
+      if (t.t === 'id' && (t.v === 'system' || t.v === 'getchar' || (t.v === 'cin' && this.isOp('.', 1)))) { while (!this.isOp(';') && this.peek().t !== 'eof') this.next(); return 'void 0'; }
+      const e = this.parseUnary(), op = this.peek();
       if (op.t === 'op') {
-        if (op.v === '=') { this.next(); const e = this.parseExpr(); return tg.set(this.conv(tg.type, e)); }
-        if (['+=', '-=', '*=', '/=', '%='].includes(op.v)) {
-          this.next(); const e = this.parseExpr();
-          return tg.set(this.conv(tg.type, this.combine(op.v[0], { js: tg.get, type: tg.type }, e, L)));
-        }
-        if (op.v === '++' || op.v === '--') {
-          this.next();
-          return tg.set(this.conv(tg.type, this.combine(op.v === '++' ? '+' : '-', { js: tg.get, type: tg.type }, { js: '1', type: 'int' }, L)));
-        }
+        if (op.v === '=') { this.next(); if (!e.lv) throw new LabError('Só é possível atribuir valores a variáveis.', L); return e.lv.set(this.conv(e.type, this.parseExpr())); }
+        if (['+=', '-=', '*=', '/=', '%='].includes(op.v)) { this.next(); if (!e.lv) throw new LabError('Só é possível alterar variáveis.', L); return e.lv.set(this.conv(e.type, this.combine(op.v[0], e, this.parseExpr(), L))); }
+        if (op.v === '++' || op.v === '--') { this.next(); return this.incdec(e, op.v, L); }
+        if ((op.v === '<<' || op.v === '>>') && isStream(e.type)) return this.parseBinFrom(e, 1).js;
         if (op.v === '==') throw new LabError('Para atribuir um valor usa «=» (o «==» serve para comparar).', L);
       }
-      throw new LabError(`Esperava uma atribuição (por exemplo ${tg.name} = ...) perto de «${show(op)}».`, L);
+      if (e.call) return e.js;
+      throw new LabError(`Esperava uma atribuição (por exemplo x = ...) ou uma chamada de função perto de «${show(op)}».`, L);
     }
-    body(L) { const b = this.stmt(); return b; }
+    incdec(e, op, L) {
+      if (!e.lv) throw new LabError('++ e -- só se aplicam a variáveis.', L);
+      if (isPtr(e.type)) return e.lv.set(`__padd(${e.js},${op === '++' ? 1 : -1},${L})`);
+      return e.lv.set(this.conv(e.type, this.combine(op === '++' ? '+' : '-', e, { js: '1', type: 'int' }, L)));
+    }
     stmt() {
-      const t = this.peek(), L = t.line;
+      const t = this.peek(), L = t.line, T = `__t(${L},V);`;
       if (t.t === 'op' && t.v === '{') { this.next(); return ['{', ...this.blockBody(), '}']; }
       if (t.t === 'op' && t.v === ';') { this.next(); return []; }
-      if (t.t === 'op' && (t.v === '++' || t.v === '--')) { const e = this.simple(); this.expectOp(';', 'Falta «;» no fim da instrução.'); return [e + `;__t(${L});`]; }
-      if (t.t !== 'id') throw new LabError('Instrução inválida perto de «' + show(t) + '».', L);
-      switch (t.v) {
+      if (t.t === 'id') switch (t.v) {
         case 'if': {
           this.next(); this.expectOp('(', 'Depois de if, a condição vai entre parênteses.'); const c = this.parseExpr(); this.expectOp(')', 'Falta fechar o parêntese da condição.');
-          const s = [`if(${c.js}){`, ...this.stmt(), '}'];
+          const s = [`if(${this.cond(c)}){`, ...this.stmt(), '}'];
           if (this.isId('else')) { this.next(); s.push('else{', ...this.stmt(), '}'); }
           return s;
         }
         case 'else': throw new LabError('Encontrei um else sem if correspondente (verifica as chavetas e os «;»).', L);
-        case 'while': {
-          this.next(); this.expectOp('('); const c = this.parseExpr(); this.expectOp(')');
-          return [`while(${c.js}){__tick(${L});`, ...this.stmt(), '}'];
-        }
+        case 'while': { this.next(); this.expectOp('('); const c = this.parseExpr(); this.expectOp(')'); return [`while(${this.cond(c)}){__tick(${L});`, ...this.stmt(), '}']; }
         case 'do': {
           this.next(); const b = this.stmt();
           if (!this.isId('while')) throw new LabError('Falta o while no fim do ciclo do.', this.peek().line);
-          this.next(); this.expectOp('('); const c = this.parseExpr(); this.expectOp(')'); this.expectOp(';');
-          return [`do{__tick(${L});`, ...b, `}while(${c.js});`];
+          this.next(); this.expectOp('('); const c = this.parseExpr(); this.expectOp(')'); this.expectOp(';', 'Falta «;» depois do while do ciclo do.');
+          return [`do{__tick(${L});`, ...b, `}while(${this.cond(c)});`];
         }
         case 'for': {
           this.next(); this.expectOp('(', 'Depois de for vêm parênteses.');
-          const save = this.p; const ty = this.parseType();
+          const save = this.p, ty = this.parseType();
           if (ty) {
-            this.eatOp('&');
-            if (this.peek().t === 'id' && this.isOp(':', 1)) { // for (int v : a)
+            const ref = this.eatOp('&');
+            if (this.peek().t === 'id' && this.isOp(':', 1)) {
               const name = this.next().v; this.next();
-              const arr = this.parseExpr(); this.expectOp(')');
-              if (!isArr(arr.type)) throw new LabError('O for de intervalo precisa de um vetor depois de «:».', L);
-              this.types.set(name, ty === 'auto' ? arr.type.slice(4) : ty);
-              return [`for(V[${Q(name)}] of ${arr.js.replace(/^__r/, '__arr')}){__tick(${L});__t(${L});`, ...this.stmt(), '}'];
+              const it = this.parseExpr(); this.expectOp(')');
+              let el;
+              if (isArr(it.type)) el = it.type.slice(4); else if (it.type === 'str') el = 'char';
+              else throw new LabError('O for de intervalo precisa de um vetor ou de uma string depois de «:».', L);
+              const vt = ty === 'auto' ? el : ty;
+              const info = this.declare(name, vt, L, ref && !isArr(vt) && !isStruct(vt) && isArr(it.type));
+              const slot = `${info.global ? 'G' : 'V'}[${Q(name)}]`, k = '__k' + L;
+              const val = info.ref ? `__ptr(${it.js},${k},${L})` : isArr(vt) ? `${it.js}[${k}]` : isStruct(vt) ? (ref ? `${it.js}[${k}]` : `__clone(${it.js}[${k}])`) : this.conv(vt, { js: `__iter(${it.js},${L})[${k}]`, type: el });
+              return [`for(let ${k}=0;${k}<__iter(${it.js},${L}).length;${k}++){__tick(${L});${slot}=${val};${T}`, ...this.stmt(), '}'];
             }
           }
           this.p = save;
           let init = [];
           const ty2 = this.parseType();
-          if (ty2) init = this.declaration(ty2);
+          if (ty2) init = this.declaration(ty2, L);
           else if (!this.isOp(';')) { init.push(this.simple()); while (this.eatOp(',')) init.push(this.simple()); }
           this.expectOp(';', 'O for precisa de «;» a separar as três partes.');
-          const cond = this.isOp(';') ? { js: 'true' } : this.parseExpr();
+          const c = this.isOp(';') ? 'true' : this.cond(this.parseExpr());
           this.expectOp(';', 'O for precisa de «;» a separar as três partes.');
           const step = [];
           if (!this.isOp(')')) { step.push(this.simple()); while (this.eatOp(',')) step.push(this.simple()); }
-          this.expectOp(')');
-          return [`for(${init.join(',')};${cond.js};${step.join(',')}){__tick(${L});__t(${L});`, ...this.stmt(), '}'];
+          this.expectOp(')', 'Falta fechar o parêntese do for.');
+          return [`for(${init.join(',')};${c};${step.join(',')}){__tick(${L});${T}`, ...this.stmt(), '}'];
         }
         case 'switch': {
-          this.next(); this.expectOp('('); const e = this.parseExpr(); this.expectOp(')'); this.expectOp('{');
+          this.next(); this.expectOp('('); const e = this.num(this.parseExpr()); this.expectOp(')'); this.expectOp('{');
           const s = [`switch(${e.js}){`];
           while (!this.eatOp('}')) {
             if (this.peek().t === 'eof') throw new LabError('Falta fechar a chaveta do switch.', L);
-            if (this.isId('case')) { this.next(); const k = this.parseUnary(); this.expectOp(':', 'Falta «:» depois do case.'); s.push(`case ${k.js}:`); }
+            if (this.isId('case')) { this.next(); const k = this.num(this.parseUnary()); this.expectOp(':', 'Falta «:» depois do case.'); s.push(`case ${k.js}:`); }
             else if (this.isId('default')) { this.next(); this.expectOp(':'); s.push('default:'); }
             else s.push(...this.stmt());
           }
           s.push('}'); return s;
         }
         case 'break': case 'continue': this.next(); this.expectOp(';', 'Falta «;» depois de ' + t.v + '.'); return [t.v + ';'];
-        case 'return': this.next(); if (!this.isOp(';')) this.parseExpr(); this.expectOp(';', 'Falta «;» no fim do return.'); return ['return;'];
+        case 'return': {
+          this.next();
+          if (this.isOp(';')) { this.next(); if (this.fnRet && this.fnRet !== 'void') throw new LabError('Esta função tem de devolver um valor (return valor;).', L); return ['return;']; }
+          const e = this.parseExpr(); this.expectOp(';', 'Falta «;» no fim do return.');
+          if (this.fnRet === 'void') throw new LabError('Uma função void não devolve valores: usa só «return;».', L);
+          return this.fnRet ? [`return ${this.conv(this.fnRet, e)};`] : ['return;'];
+        }
+        case 'delete': while (!this.isOp(';') && this.peek().t !== 'eof') this.next(); this.expectOp(';'); return [];
+        case 'struct':
+          if (this.peek(1).t === 'id' && this.isOp('{', 2)) { this.next(); this.structDef(); return []; }
+          break;
         case 'cin': {
           this.next(); const s = [];
           if (!this.isOp('>>')) throw new LabError('Depois de cin usa «>>», por exemplo: cin >> x;', L);
-          while (this.eatOp('>>')) { const tg = this.parseTarget(); s.push(tg.set(this.conv(tg.type, { js: `__in(${tg.line})`, type: 'double' })) + ';'); }
-          this.expectOp(';', 'Falta «;» no fim da instrução cin.'); s.push(`__t(${L});`); return s;
+          while (this.eatOp('>>')) {
+            const tg = this.parseUnary();
+            if (!tg.lv) throw new LabError('Depois de «>>» indica a variável onde guardar o valor.', L);
+            const v = tg.type === 'str' ? `String(__in(${L}))` : tg.type === 'char' ? `String(__in(${L}))[0]` : this.conv(tg.type, { js: `__in(${L})`, type: 'double' });
+            s.push(tg.lv.set(v) + ';');
+          }
+          this.expectOp(';', 'Falta «;» no fim da instrução cin.'); s.push(T); return s;
         }
         case 'cout': {
           this.next(); const s = [];
           if (!this.isOp('<<')) throw new LabError('Depois de cout usa «<<», por exemplo: cout << x;', L);
           while (this.eatOp('<<')) {
-            if (this.isId('fixed') || this.isId('showpoint') || this.isId('scientific') || this.isId('defaultfloat')) { const m = this.next().v; s.push(`__fmt(${Q(m)});`); continue; }
+            if (this.isId('fixed') || this.isId('showpoint') || this.isId('scientific') || this.isId('defaultfloat')) { s.push(`__fmt(${Q(this.next().v)});`); continue; }
             if (this.isId('setprecision')) { this.next(); const a = this.parseArgs(); s.push(`__prec(${a[0] ? a[0].js : 6});`); continue; }
             if (this.isId('setw')) { this.next(); this.parseArgs(); continue; }
-            const e = this.parseBin(5); if (isArr(e.type)) throw new LabError('Para mostrar um vetor tens de mostrar cada elemento.', L); s.push(`__out(${e.js},${Q(e.type)});`); }
-          this.expectOp(';', 'Falta «;» no fim da instrução cout.'); s.push(`__t(${L});`); return s;
+            const e = this.parseBin(5);
+            if (isArr(e.type)) throw new LabError('Para mostrar um vetor tens de mostrar cada elemento.', L);
+            if (isStruct(e.type)) throw new LabError('Para mostrar um registo tens de mostrar cada campo (por exemplo a.nome).', L);
+            if (isPtr(e.type)) throw new LabError('Mostrar um endereço não é suportado: usa *p para ver o valor apontado.', L);
+            if (e.type === 'void') throw new LabError('Esta função não devolve nenhum valor (é void).', L);
+            s.push(`__out(${e.js},${Q(e.type)});`);
+          }
+          this.expectOp(';', 'Falta «;» no fim da instrução cout.'); s.push(T); return s;
         }
       }
-      const save = this.p; const ty = this.parseType();
-      if (ty) { const ex = this.declaration(ty); this.expectOp(';', 'Falta «;» no fim da declaração.'); return [ex.join(';') + `;__t(${L});`]; }
-      this.p = save;
+      if (t.t === 'id' && this.isTypeStart()) { const ex = this.declaration(this.parseType(), L); this.expectOp(';', 'Falta «;» no fim da declaração.'); return [ex.join(';') + ';' + T]; }
       const e = this.simple(); this.expectOp(';', 'Falta «;» no fim da instrução.');
-      return [e + `;__t(${L});`];
+      return [e + ';' + T];
     }
   }
+  function tname(t) { return isArr(t) ? 'vetor de ' + tname(t.slice(4)) : isPtr(t) ? 'apontador para ' + tname(t.slice(4)) : isStruct(t) ? t.slice(7) : ({ str: 'string', double: 'double', int: 'int', char: 'char', bool: 'bool' }[t] || t); }
 
   /* ---------- Pseudocódigo ---------- */
   const SKIP = new Set(['INICIO', 'FIMALGORITMO', 'ALGORITMO', 'VAR', 'VARIAVEIS', 'INTEIRO', 'REAL', 'LOGICO', 'CARACTER', 'TEXTO', 'DECLARAR']);
@@ -777,9 +1202,9 @@ const Lab = (() => {
     try {
       if (!src || !src.trim()) throw new LabError('Escreve primeiro o teu programa.', 1);
       let body;
-      if (lang === 'cpp') { const P = new CppParser(tokenize(src, 'cpp').filter(t => t.t !== 'nl'), 'cpp'); body = P.program(); }
+      if (lang === 'cpp') { const P = new CppParser(tokenize(src, 'cpp').filter(t => t.t !== 'nl')); body = P.program(); }
       else body = compilePseudo(src);
-      const code = '"use strict";const {V,__fmt,__prec,__in,__out,__nl,__r,__ix,__set,__arr,__mkarr,__idiv,__fdiv,__mod,__toInt,__tick,__t,__err}=__rt;\n' + body.join('\n');
+      const code = '"use strict";const {' + HELPERS + '}=__rt;const G=__rt.G,V=__rt.V;\n' + body.join('\n');
       const fn = new Function('__rt', code);
       return { ok: true, fn, lang, code };
     } catch (e) {
@@ -788,62 +1213,226 @@ const Lab = (() => {
     }
   }
 
+  const HELPERS = '__fmt,__prec,__in,__out,__nl,__r,__ix,__set,__arr,__mkarr,__idiv,__fdiv,__mod,__toInt,__tick,__t,__err,__dget,__dset,__mkref,__ptr,__padd,__pdiff,__peq,__ixv,__setv,__ixs,__strset,__getf,__setf,__fref,__clone,__pad,__new,__ord,__chr,__truth,__iter,__substr,__tostr,__stonum,__ctype,__enter,__leave,__fopen,__fm,__sin,__sout,__sok,__getline';
+  class Ref { constructor(get, set, label) { this.get = get; this.set = set; this.label = label; } }
+  class Ptr { constructor(a, i) { this.a = a; this.i = i; } }
+  class Stream { constructor(kind) { this.kind = kind; this.name = null; this.open = false; this.fail = false; this.eof = false; this.data = ''; this.pos = 0; this.buf = ''; this.reading = false; } }
   function fmtNum(v) {
     if (Number.isInteger(v)) return String(v);
     if (!isFinite(v)) return v > 0 ? 'inf' : v < 0 ? '-inf' : 'nan';
     return String(Number(v.toPrecision(6)));
   }
   function run(prog, inputs, opts = {}) {
-    if (!prog.ok) return { error: prog.error, line: prog.line, output: '', trace: [] };
-    const V = Object.create(null); let out = ''; const trace = []; let ticks = 0, inp = 0;
+    if (!prog.ok) return { error: prog.error, line: prog.line, output: '', trace: [], files: {} };
+    const V = Object.create(null), G = Object.create(null);
+    let out = ''; const trace = []; let ticks = 0, inp = 0, depth = 0;
     const pseudo = prog.lang !== 'cpp';
+    const files = Object.assign({}, opts.files || {}); const streams = [];
     const E = (m, L) => { throw new LabError(m, L); };
     const checkIdx = (arr, name, i, L) => {
       if (!Array.isArray(arr)) E(`«${name}» não é um vetor.`, L);
       if (!Number.isInteger(i)) E(`O índice de «${name}» tem de ser inteiro.`, L);
       if (i < 0 || i >= arr.length) E(`Índice ${i} fora dos limites de «${name}» (posições válidas: 0 a ${arr.length - 1}).`, L);
     };
+    const vidx = (a, i, L) => {
+      if (!Array.isArray(a)) E('Só é possível usar [ ] com vetores.', L);
+      if (!Number.isInteger(i)) E('O índice tem de ser um número inteiro.', L);
+      if (i < 0 || i >= a.length) E(`Índice ${i} fora dos limites do vetor (posições válidas: 0 a ${a.length - 1}).`, L);
+    };
     let fixed = false, prec = 6;
+    const fmtOut = (v, type) => {
+      if (typeof v === 'boolean') return pseudo ? (v ? 'VERDADEIRO' : 'FALSO') : (v ? '1' : '0');
+      if (typeof v === 'number') return (!pseudo && type === 'double') ? (fixed ? v.toFixed(prec) : (Number.isInteger(v) ? String(v) : String(Number(v.toPrecision(Math.max(1, prec)))))) : fmtNum(v);
+      return String(v);
+    };
+    const refCache = new WeakMap();
+    const commit = s => { if (s.open && !s.reading && s.name !== null) files[s.name] = s.buf; };
+    const fopen = (s, name, mode) => {
+      if (s.open) commit(s);
+      s.name = String(name); s.fail = false; s.eof = false; s.pos = 0;
+      const read = s.kind === 'ifstream' || (s.kind === 'fstream' && (mode === 'in' || (mode == null && s.name in files)));
+      if (read) {
+        if (!(s.name in files)) { s.open = false; s.fail = true; return; }
+        s.data = files[s.name]; s.open = true; s.reading = true;
+      } else {
+        s.open = true; s.reading = false; s.buf = mode === 'app' ? (files[s.name] || '') : '';
+        if (mode !== 'app') files[s.name] = '';
+      }
+    };
+    const snap = v => {
+      if (Array.isArray(v)) return v.map(snap);
+      if (v instanceof Ref) return { __ref: v.label };
+      if (v instanceof Ptr) return { __ref: '[' + v.i + ']' };
+      if (v instanceof Stream) return { __file: v.name || '' };
+      if (v && typeof v === 'object') { const o = {}; for (const k in v) o[k] = snap(v[k]); return o; }
+      return v;
+    };
     const rt = {
-      V,
+      V, G,
       __fmt: m => { fixed = m === 'fixed'; },
       __prec: n => { prec = Math.max(0, Math.min(15, n | 0)); },
       __in: L => { if (inp >= inputs.length) E('O programa pede mais valores de entrada do que os fornecidos.', L); return inputs[inp++]; },
       __out: (v, type) => {
-        if (typeof v === 'boolean') out += pseudo ? (v ? 'VERDADEIRO' : 'FALSO') : (v ? '1' : '0');
-        else if (typeof v === 'number') out += (!pseudo && type === 'double') ? (fixed ? v.toFixed(prec) : (Number.isInteger(v) ? String(v) : String(Number(v.toPrecision(Math.max(1, prec)))))) : fmtNum(v);
-        else out += String(v);
+        out += fmtOut(v, type);
         if (out.length > 20000) E('O programa escreveu demasiado texto. Talvez um ciclo nunca termine: verifica a condição de paragem.', null);
       },
       __nl: () => { out += '\n'; },
-      __r: (V, n, L) => { const v = V[n]; if (v === undefined) E(n in V ? `A variável «${n}» foi declarada mas ainda não tem valor.` : `A variável «${n}» é usada antes de receber um valor.`, L); return v; },
-      __arr: (V, n, L) => { const v = rt.__r(V, n, L); if (!Array.isArray(v)) E(`«${n}» não é um vetor.`, L); return v; },
-      __ix: (V, n, i, L) => { const a = rt.__r(V, n, L); checkIdx(a, n, i, L); const v = a[i]; if (v === undefined) E(`A posição ${n}[${i}] ainda não tem valor.`, L); return v; },
-      __set: (V, n, i, val, L) => { const a = rt.__r(V, n, L); checkIdx(a, n, i, L); a[i] = val; return val; },
-      __mkarr: (list, size, L) => {
-        if (size !== null && (!Number.isInteger(size) || size <= 0)) E('O tamanho do vetor tem de ser um inteiro positivo.', L);
-        if (size !== null && size > 100000) E('Vetor demasiado grande.', L);
-        if (list && size !== null && list.length > size) E('Há mais valores do que o tamanho do vetor.', L);
-        const n = size === null ? list.length : size;
-        const a = new Array(n).fill(list ? 0 : undefined);
-        if (list) list.forEach((v, i) => { a[i] = v; });
-        return a;
-      },
+      __r: (F, n, L) => { const v = F[n]; if (v === undefined) E(n in F ? `A variável «${n}» foi declarada mas ainda não tem valor.` : `A variável «${n}» é usada antes de receber um valor.`, L); return v; },
+      __arr: (F, n, L) => { const v = rt.__r(F, n, L); if (!Array.isArray(v)) E(`«${n}» não é um vetor.`, L); return v; },
+      __ix: (F, n, i, L) => { const a = rt.__r(F, n, L); checkIdx(a, n, i, L); const v = a[i]; if (v === undefined) E(`A posição ${n}[${i}] ainda não tem valor.`, L); return v; },
+      __set: (F, n, i, val, L) => { const a = rt.__r(F, n, L); checkIdx(a, n, i, L); a[i] = val; return val; },
+      __mkarr: (list, size, L) => rt.__pad(list, [size], () => (list ? 0 : undefined), L),
       __idiv: (a, b, L) => { if (+b === 0) E('Divisão por zero.', L); return Math.trunc(a / b); },
       __fdiv: (a, b, L) => { if (+b === 0) E('Divisão por zero.', L); return a / b; },
       __mod: (a, b, L) => { if (+b === 0) E('Resto da divisão por zero.', L); return a % b; },
       __toInt: v => (typeof v === 'boolean' ? +v : Math.trunc(v)),
       __tick: L => { if (++ticks > LIMIT) E('O ciclo repetiu-se mais de 100 000 vezes. Verifica se a condição de paragem chega a ser falsa.', L); },
-      __t: L => { if (opts.trace !== false && trace.length < 300) { const vars = {}; for (const k in V) vars[k] = Array.isArray(V[k]) ? V[k].slice() : V[k]; trace.push({ line: L, vars, out: out.length }); } },
-      __err: (m, L) => E(m, L)
+      __t: (L, F = V) => {
+        if (opts.trace === false || trace.length >= 300) return;
+        const vars = {};
+        for (const k in G) vars[k] = snap(G[k]);
+        for (const k in F) vars[k] = snap(F[k]);
+        trace.push({ line: L, vars, out: out.length });
+      },
+      __err: (m, L) => E(m, L),
+      /* apontadores e referências */
+      __mkref: (F, n) => {
+        let m = refCache.get(F); if (!m) refCache.set(F, m = new Map());
+        if (!m.has(n)) m.set(n, new Ref(() => F[n], v => (F[n] = v), n));
+        return m.get(n);
+      },
+      __ptr: (a, i, L) => { if (!Array.isArray(a)) E('Só é possível apontar para posições de um vetor.', L); if (!Number.isInteger(i) || i < 0 || i > a.length) E('O apontador ficaria fora dos limites do vetor.', L); return new Ptr(a, i); },
+      __dget: (p, L) => {
+        if (p === null) E('Apontador nulo (nullptr): não aponta para nenhuma variável.', L);
+        if (p === undefined) E('O apontador não foi inicializado.', L);
+        let v;
+        if (p instanceof Ptr) { if (p.i < 0 || p.i >= p.a.length) E('O apontador está fora dos limites do vetor.', L); v = p.a[p.i]; }
+        else v = p.get();
+        if (v === undefined) E('A variável apontada ainda não tem valor.', L);
+        return v;
+      },
+      __dset: (p, v, L) => {
+        if (p === null) E('Apontador nulo (nullptr): não aponta para nenhuma variável.', L);
+        if (p === undefined) E('O apontador não foi inicializado.', L);
+        if (p instanceof Ptr) { if (p.i < 0 || p.i >= p.a.length) E('O apontador está fora dos limites do vetor.', L); p.a[p.i] = v; }
+        else p.set(v);
+        return v;
+      },
+      __padd: (p, k, L) => {
+        if (p === null || p === undefined) E('Não é possível fazer contas com um apontador nulo ou não inicializado.', L);
+        if (!(p instanceof Ptr)) { if (k === 0) return p; E('A aritmética de apontadores só funciona dentro de vetores.', L); }
+        const ni = p.i + k;
+        if (ni < 0 || ni > p.a.length) E('O apontador saiu fora dos limites do vetor.', L);
+        return new Ptr(p.a, ni);
+      },
+      __pdiff: (p, q, L) => { if (!(p instanceof Ptr) || !(q instanceof Ptr) || p.a !== q.a) E('Só é possível comparar ou subtrair apontadores para o mesmo vetor.', L); return p.i - q.i; },
+      __peq: (p, q) => { if (p === q) return true; if (p instanceof Ptr && q instanceof Ptr) return p.a === q.a && p.i === q.i; return false; },
+      /* vetores, strings e registos */
+      __ixv: (a, i, L) => { vidx(a, i, L); const v = a[i]; if (v === undefined) E(`A posição [${i}] do vetor ainda não tem valor.`, L); return v; },
+      __setv: (a, i, v, L) => { vidx(a, i, L); a[i] = v; return v; },
+      __ixs: (s, i, L) => { if (!Number.isInteger(i) || i < 0 || i >= s.length) E(`Índice ${i} fora dos limites do texto (posições válidas: 0 a ${s.length - 1}).`, L); return s[i]; },
+      __strset: (s, i, c, L) => { if (!Number.isInteger(i) || i < 0 || i >= s.length) E(`Índice ${i} fora dos limites do texto (posições válidas: 0 a ${s.length - 1}).`, L); return s.slice(0, i) + c + s.slice(i + 1); },
+      __getf: (o, f, L) => { const v = o[f]; if (v === undefined) E(`O campo «${f}» ainda não tem valor.`, L); return v; },
+      __setf: (o, f, v) => (o[f] = v),
+      __fref: (o, f) => new Ref(() => o[f], v => (o[f] = v), f),
+      __clone: v => {
+        const c = x => Array.isArray(x) ? x.map(c) : (x && typeof x === 'object' && x.constructor === Object) ? Object.fromEntries(Object.entries(x).map(([k, y]) => [k, c(y)])) : x;
+        return c(v);
+      },
+      __pad: (lit, dims, fac, L) => {
+        if (lit && dims.length > 1 && lit.length && !Array.isArray(lit[0])) { // lista plana para matriz
+          const chunk = (flat, ds) => { if (ds.length === 1) return flat; const inner = ds.slice(1).reduce((a, b) => a * b, 1); const o = []; for (let i = 0; i < flat.length; i += inner) o.push(chunk(flat.slice(i, i + inner), ds.slice(1))); return o; };
+          lit = chunk(lit, dims);
+        }
+        const build = (l, d) => {
+          const n = dims[d] === null ? (l ? l.length : 0) : dims[d];
+          if (!Number.isInteger(n) || n <= 0) E('O tamanho do vetor tem de ser um inteiro positivo.', L);
+          if (n > 100000) E('Vetor demasiado grande.', L);
+          if (l && l.length > n) E('Há mais valores do que o tamanho do vetor.', L);
+          const a = new Array(n);
+          for (let i = 0; i < n; i++) a[i] = d < dims.length - 1 ? build(l && i < l.length ? l[i] : null, d + 1) : (l && i < l.length ? l[i] : fac());
+          return a;
+        };
+        return build(lit, 0);
+      },
+      __new: (fac, n, L) => {
+        if (n === null) return new Ptr([fac()], 0);
+        if (!Number.isInteger(n) || n < 0) E('O tamanho em new tem de ser um inteiro não negativo.', L);
+        if (n > 100000) E('Memória pedida demasiado grande.', L);
+        return new Ptr(Array.from({ length: n }, fac), 0);
+      },
+      __ord: c => (typeof c === 'string' ? (c.length ? c.charCodeAt(0) : 0) : c),
+      __chr: n => (typeof n === 'string' ? n : String.fromCharCode(Math.trunc(n))),
+      __truth: v => (v instanceof Stream ? !v.fail : v === null ? false : !!v),
+      __iter: (v, L) => { if (Array.isArray(v)) return v; if (typeof v === 'string') return v; E('O for de intervalo precisa de um vetor ou de uma string.', L); },
+      __substr: (s, pos, len, L) => { if (pos < 0 || pos > s.length) E('substr: a posição inicial está fora do texto.', L); return len === null ? s.slice(pos) : s.slice(pos, pos + Math.max(0, len)); },
+      __tostr: (v, dbl) => (dbl ? v.toFixed(6) : String(Math.trunc(v))),
+      __stonum: (s, int, L) => { const m = /^\s*[+-]?\d+(\.\d+)?/.exec(s); if (!m) E('stoi/stod: o texto não começa por um número.', L); return int ? Math.trunc(Number(m[0])) : Number(m[0]); },
+      __ctype: (f, code) => {
+        const c = String.fromCharCode(code);
+        return { isalpha: /[A-Za-z]/, isdigit: /[0-9]/, isupper: /[A-Z]/, islower: /[a-z]/, isspace: /\s/, isalnum: /[A-Za-z0-9]/, ispunct: /[!-\/:-@\[-`{-~]/ }[f].test(c);
+      },
+      __enter: L => { if (++depth > 2000) E('Demasiadas chamadas encadeadas (recursão sem fim?). Verifica o caso de paragem.', L); },
+      __leave: () => { depth--; },
+      /* ficheiros virtuais */
+      __fopen: (kind, name, mode) => { const s = new Stream(kind); streams.push(s); if (name !== null) fopen(s, name, mode); return s; },
+      __fm: (s, m, args, L) => {
+        if (!(s instanceof Stream)) E('Isto não é um ficheiro.', L);
+        switch (m) {
+          case 'open': fopen(s, args[0], args[1]); return;
+          case 'close': commit(s); s.open = false; return;
+          case 'is_open': return s.open;
+          case 'eof': return s.eof;
+          case 'fail': return s.fail;
+          case 'good': return !s.fail && !s.eof;
+        }
+      },
+      __sin: (s, ref, type, L) => {
+        if (!s.open || !s.reading) { s.fail = true; if (!s.open) E('O ficheiro não está aberto para leitura (verifica o nome e se foi aberto com ifstream).', L); return s; }
+        if (s.fail) { if (type === 'int' || type === 'double') rt.__dset(ref, 0, L); return s; }
+        const d = s.data;
+        while (s.pos < d.length && /\s/.test(d[s.pos])) s.pos++;
+        if (s.pos >= d.length) { s.eof = true; s.fail = true; if (type === 'int' || type === 'double') rt.__dset(ref, 0, L); return s; }
+        let v;
+        if (type === 'int' || type === 'double' || type === 'bool') {
+          const m = (type === 'double' ? /^[+-]?\d+(\.\d+)?/ : /^[+-]?\d+/).exec(d.slice(s.pos));
+          if (!m) { s.fail = true; rt.__dset(ref, 0, L); return s; }
+          v = Number(m[0]); s.pos += m[0].length;
+        } else if (type === 'char') { v = d[s.pos]; s.pos++; }
+        else { const m = /^\S+/.exec(d.slice(s.pos)); v = m[0]; s.pos += v.length; }
+        if (s.pos >= d.length) s.eof = true;
+        rt.__dset(ref, v, L);
+        return s;
+      },
+      __sout: (s, v, type) => {
+        if (!s.open || s.reading) { s.fail = true; return s; }
+        s.buf += fmtOut(v, type);
+        return s;
+      },
+      __sok: s => !s.fail,
+      __getline: (s, ref, L) => {
+        if (s === null) { rt.__dset(ref, String(rt.__in(L)), L); return new Stream('ifstream'); }
+        if (!s.open || !s.reading) { s.fail = true; if (!s.open) E('O ficheiro não está aberto para leitura.', L); return s; }
+        if (s.fail) return s;
+        const d = s.data;
+        if (s.pos >= d.length) { s.eof = true; s.fail = true; return s; }
+        const k = d.indexOf('\n', s.pos);
+        let line;
+        if (k < 0) { line = d.slice(s.pos); s.pos = d.length; s.eof = true; }
+        else { line = d.slice(s.pos, k); s.pos = k + 1; }
+        rt.__dset(ref, line.replace(/\r$/, ''), L);
+        return s;
+      }
     };
+    const finish = () => { streams.forEach(commit); return files; };
     try {
       prog.fn(rt);
-      return { output: out, trace, error: null };
+      return { output: out, trace, error: null, files: finish() };
     } catch (e) {
-      if (e instanceof LabError) return { output: out, trace, error: e.message, line: e.line };
-      if (e instanceof RangeError) return { output: out, trace, error: 'O programa usou memória a mais.', line: null };
-      return { output: out, trace, error: 'Erro durante a execução: ' + e.message, line: null };
+      finish();
+      if (e instanceof LabError) return { output: out, trace, error: e.message, line: e.line, files };
+      if (e instanceof RangeError) return { output: out, trace, error: 'O programa usou memória a mais (talvez uma recursão sem fim).', line: null, files };
+      return { output: out, trace, error: 'Erro durante a execução: ' + e.message, line: null, files };
     }
   }
   function lastNumber(s) {
@@ -851,20 +1440,20 @@ const Lab = (() => {
     return m ? Number(m[m.length - 1].replace(',', '.')) : null;
   }
   function same(got, exp) { return got !== null && Math.abs(got - exp) <= Math.max(0.006, Math.abs(exp) * 1e-4); }
-  function check(src, lang, tests) {
+  function check(src, lang, tests, files) {
     const prog = compile(src, lang);
     if (!prog.ok) return { ok: false, compileError: prog.error, line: prog.line, results: [] };
     const results = tests.map(([input, expected]) => {
-      const r = run(prog, [input]);
+      const r = run(prog, [input], { files });
       const got = r.error ? null : lastNumber(r.output);
-      return { input, expected, output: r.output, got, error: r.error, line: r.line, pass: !r.error && same(got, expected), trace: r.trace };
+      return { input, expected, output: r.output, got, error: r.error, line: r.line, pass: !r.error && same(got, expected), trace: r.trace, files: r.files };
     });
     return { ok: results.every(r => r.pass), results, prog };
   }
   return { compile, run, check, lastNumber, fmtNum };
 })();
 
-const data=[["UC00245 · Desenvolver algoritmos",[{"title":"Total da papelaria","label":"quantidade","code":"LER x\npreco ← 3\ntotal ← x × preco\nESCREVER total","x":4,"concept":"preço unitário","challenge":"calcular o custo de bilhetes a 5 €","run":[0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48,51,54,57,60,63,66,69,72,75,78,81,84,87,90],"tests":[[0,0],[4,20],[6,30]],"solution":"LER x\ntotal ← x × 5\nESCREVER total"},{"title":"Tempo da viagem","label":"horas","code":"LER x\nminutos ← x × 60 + 15\nESCREVER minutos","x":2,"concept":"minutos adicionais","challenge":"converter horas em minutos e acrescentar meia hora","run":[15,75,135,195,255,315,375,435,495,555,615,675,735,795,855,915,975,1035,1095,1155,1215,1275,1335,1395,1455,1515,1575,1635,1695,1755,1815],"tests":[[0,30],[2,150],[4,270]],"solution":"LER h\nESCREVER h × 60 + 30"},{"title":"Decisão no fluxograma","label":"nota","code":"Ler x → ◇ x ≥ 10? ◇\n Sim → escrever 1 → fim\n Não → escrever 0 → fim","x":10,"concept":"limite de aprovação","challenge":"indicar com 1 uma classificação de pelo menos 15","run":[0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"tests":[[0,0],[14,0],[15,1]],"solution":"LER nota\nSE nota ≥ 15 ENTÃO\n  ESCREVER 1\nSENÃO\n  ESCREVER 0"},{"title":"Contagem decrescente","label":"valor inicial","code":"LER x\nn ← x\nvoltas ← 0\nENQUANTO n > 0\n n ← n − 2\n voltas ← voltas + 1\nESCREVER voltas","x":5,"concept":"passo do ciclo","challenge":"contar as voltas ao diminuir três unidades de cada vez","run":[0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15],"tests":[[0,0],[5,2],[7,3]],"solution":"LER x\nn ← x\nvoltas ← 0\nENQUANTO n > 0 FAÇA\n  n ← n − 3\n  voltas ← voltas + 1\nFIMENQUANTO\nESCREVER voltas"},{"title":"Teste de mesa","label":"limite","code":"LER x\ns ← 0\nPARA i DE 1 ATÉ x\n s ← s + i\nESCREVER s","x":4,"concept":"acumulador","challenge":"somar os números pares de 2 até 2 × x","run":[0,1,3,6,10,15,21,28,36,45,55,66,78,91,105,120,136,153,171,190,210,231,253,276,300,325,351,378,406,435,465],"tests":[[0,0],[4,20],[6,42]],"solution":"LER x\ns ← 0\nPARA i DE 1 ATÉ x\n  s ← s + 2 × i\nESCREVER s"},{"title":"Comparar propostas","label":"quantidade","code":"LER x\nA ← 3 × x\nB ← 5 + 2 × x\nSE A < B ENTÃO ESCREVER A\nSENÃO ESCREVER B","x":6,"concept":"menor custo","challenge":"escolher o menor custo entre 4 × x e 8 + 2 × x","run":[0,3,6,9,12,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65],"tests":[[0,0],[6,20],[8,24]],"solution":"LER x\nA ← 4 × x\nB ← 8 + 2 × x\nSE A < B ENTÃO ESCREVER A\nSENÃO ESCREVER B"}]],["UC00606 · Programação estruturada",[{"title":"Leitura e cálculo","label":"quantidade","code":"int x; cin >> x;\ncout << x * 4;","x":3,"concept":"valor unitário","challenge":"calcular o preço de x artigos a 7 €","run":[0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120],"tests":[[0,0],[3,21],[5,35]],"solution":"#include <iostream>\nusing namespace std;\nint main() {\n  int x;\n  cin >> x;\n  cout << x * 7 << endl;\n  return 0;\n}"},{"title":"Divisão inteira","label":"peças","code":"int x; cin >> x;\ncout << x / 4;","x":11,"concept":"capacidade da caixa","challenge":"mostrar quantas peças sobram depois de encher caixas de quatro","run":[0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,6,6,6,6,7,7,7],"tests":[[0,0],[11,3],[13,1]],"solution":"int x; cin >> x;\ncout << x % 4;"},{"title":"Decisão com if","label":"idade","code":"int x; cin >> x;\nif (x >= 16) cout << 1;\nelse cout << 0;","x":16,"concept":"idade mínima","challenge":"permitir a entrada apenas a partir dos 18 anos, mostrando 1 ou 0","run":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"tests":[[0,0],[16,0],[18,1]],"solution":"int x; cin >> x;\nif (x >= 18) cout << 1;\nelse cout << 0;"},{"title":"Menu com switch","label":"opção","code":"int x; cin >> x;\nswitch (x) {\n case 1: cout << 10; break;\n case 2: cout << 20; break;\n default: cout << 0;\n}","x":2,"concept":"ramo default","challenge":"criar um menu em que 1 devolve 5, 2 devolve 8 e outras opções devolvem 0","run":[0,10,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"tests":[[1,5],[2,8],[4,0]],"solution":"int x; cin >> x;\nswitch (x) {\n case 1: cout << 5; break;\n case 2: cout << 8; break;\n default: cout << 0;\n}"},{"title":"Repetir com while","label":"saldo","code":"int x; cin >> x;\nint n=0;\nwhile (x >= 3) { x -= 3; n++; }\ncout << n;","x":10,"concept":"contador","challenge":"contar compras de 4 € que cabem no saldo","run":[0,0,0,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,10],"tests":[[0,0],[10,2],[12,3]],"solution":"int x; cin >> x;\nint n = 0;\nwhile (x >= 4) {\n  x -= 4;\n  n++;\n}\ncout << n;"},{"title":"Acumular com for","label":"limite","code":"int x; cin >> x;\nint s=0;\nfor(int i=1;i<=x;i++) s+=i;\ncout << s;","x":5,"concept":"limite inclusivo","challenge":"calcular a soma dos inteiros de zero até x, excluindo x","run":[0,1,3,6,10,15,21,28,36,45,55,66,78,91,105,120,136,153,171,190,210,231,253,276,300,325,351,378,406,435,465],"tests":[[0,0],[5,10],[7,21]],"solution":"int x; cin >> x;\nint s = 0;\nfor (int i = 0; i < x; i++) s += i;\ncout << s;"}]],["UC00607 · Programas complexos",[{"title":"Índices e atualizações","label":"novo valor","code":"int x; cin >> x;\nint a[]={3,5,7};\na[1]=x;\ncout << a[0]+a[1];","x":9,"concept":"posição alterada","challenge":"substituir o último elemento por x e somar os três elementos","run":[3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33],"tests":[[0,8],[9,17],[11,19]],"solution":"int x; cin >> x;\nint a[] = {3, 5, 7};\na[2] = x;\ncout << a[0] + a[1] + a[2];"},{"title":"Acumulador e média","label":"terceira nota","code":"int x; cin >> x;\nint a[]={8,12,x}, s=0;\nfor(int v:a) s+=v;\ncout << s;","x":10,"concept":"soma antes da divisão","challenge":"calcular a média das notas 9, 12 e x por divisão real","run":[20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50],"tests":[[0,7],[10,10.333333333333334],[12,11]],"solution":"int x; cin >> x;\nint a[] = {9, 12, x};\nint s = 0;\nfor (int v : a) s += v;\ndouble m = s / 3.0;\ncout << m;"},{"title":"Contagem condicional","label":"nota intermédia","code":"int x; cin >> x;\nint a[]={9,x,18}, n=0;\nfor(int v:a) if(v>=10) n++;\ncout << n;","x":10,"concept":"inclusão do limite","challenge":"contar as notas abaixo de 10 no mesmo array","run":[1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"tests":[[0,2],[10,1],[12,1]],"solution":"int x; cin >> x;\nint a[] = {9, x, 18}, n = 0;\nfor (int v : a) if (v < 10) n++;\ncout << n;"},{"title":"Máximo e empates","label":"nota central","code":"int x; cin >> x;\nint a[]={12,x,12}, pos=0;\nfor(int i=1;i<3;i++)\n if(a[i]>a[pos]) pos=i;\ncout << pos;","x":12,"concept":"comparação estrita","challenge":"devolver o índice da última ocorrência do máximo","run":[0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"tests":[[0,2],[12,2],[14,1]],"solution":"int x; cin >> x;\nint a[] = {12, x, 12}, pos = 0;\nfor (int i = 1; i < 3; i++)\n  if (a[i] >= a[pos]) pos = i;\ncout << pos;"},{"title":"Validação das entradas","label":"primeira tentativa","code":"int x; cin >> x;\nint tentativas[]={x,14};\nfor(int v:tentativas)\n if(v>=0 && v<=20){cout << v; break;}","x":21,"concept":"intervalo permitido","challenge":"aceitar apenas valores de 1 a 19 e usar a segunda tentativa válida, 14, se necessário","run":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,14,14,14,14,14,14,14,14,14,14],"tests":[[0,14],[7,7],[20,14]],"solution":"int x; cin >> x;\nint t[] = {x, 14};\nfor (int v : t)\n  if (v >= 1 && v <= 19) { cout << v; break; }"},{"title":"Gestor de classificações","label":"quinta nota","code":"int x; cin >> x;\nint a[]={12,8,15,9,x}, menor=a[0];\nfor(int v:a) if(v<menor) menor=v;\ncout << menor;","x":6,"concept":"inicialização do mínimo","challenge":"calcular a amplitude (máximo menos mínimo) das mesmas cinco notas","run":[0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8],"tests":[[0,15],[6,9],[8,7]],"solution":"int x; cin >> x;\nint a[] = {12, 8, 15, 9, x};\nint menor = a[0], maior = a[0];\nfor (int v : a) {\n  if (v < menor) menor = v;\n  if (v > maior) maior = v;\n}\ncout << maior - menor;"}]]];
+const data=[["UC00245 · Desenvolver algoritmos",[{"title":"Total da papelaria","label":"quantidade","code":"LER x\npreco ← 3\ntotal ← x × preco\nESCREVER total","x":4,"concept":"preço unitário","challenge":"calcular o custo de bilhetes a 5 €","run":[0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48,51,54,57,60,63,66,69,72,75,78,81,84,87,90],"tests":[[0,0],[4,20],[6,30]],"solution":"LER x\ntotal ← x × 5\nESCREVER total","topic":"Sequência"},{"title":"Tempo da viagem","label":"horas","code":"LER x\nminutos ← x × 60 + 15\nESCREVER minutos","x":2,"concept":"minutos adicionais","challenge":"converter horas em minutos e acrescentar meia hora","run":[15,75,135,195,255,315,375,435,495,555,615,675,735,795,855,915,975,1035,1095,1155,1215,1275,1335,1395,1455,1515,1575,1635,1695,1755,1815],"tests":[[0,30],[2,150],[4,270]],"solution":"LER h\nESCREVER h × 60 + 30","topic":"Sequência"},{"title":"Decisão no fluxograma","label":"nota","code":"Ler x → ◇ x ≥ 10? ◇\n Sim → escrever 1 → fim\n Não → escrever 0 → fim","x":10,"concept":"limite de aprovação","challenge":"indicar com 1 uma classificação de pelo menos 15","run":[0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"tests":[[0,0],[14,0],[15,1]],"solution":"LER nota\nSE nota ≥ 15 ENTÃO\n  ESCREVER 1\nSENÃO\n  ESCREVER 0","topic":"Decisão"},{"title":"Contagem decrescente","label":"valor inicial","code":"LER x\nn ← x\nvoltas ← 0\nENQUANTO n > 0\n n ← n − 2\n voltas ← voltas + 1\nESCREVER voltas","x":5,"concept":"passo do ciclo","challenge":"contar as voltas ao diminuir três unidades de cada vez","run":[0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15],"tests":[[0,0],[5,2],[7,3]],"solution":"LER x\nn ← x\nvoltas ← 0\nENQUANTO n > 0 FAÇA\n  n ← n − 3\n  voltas ← voltas + 1\nFIMENQUANTO\nESCREVER voltas","topic":"Repetição"},{"title":"Teste de mesa","label":"limite","code":"LER x\ns ← 0\nPARA i DE 1 ATÉ x\n s ← s + i\nESCREVER s","x":4,"concept":"acumulador","challenge":"somar os números pares de 2 até 2 × x","run":[0,1,3,6,10,15,21,28,36,45,55,66,78,91,105,120,136,153,171,190,210,231,253,276,300,325,351,378,406,435,465],"tests":[[0,0],[4,20],[6,42]],"solution":"LER x\ns ← 0\nPARA i DE 1 ATÉ x\n  s ← s + 2 × i\nESCREVER s","topic":"Repetição"},{"title":"Comparar propostas","label":"quantidade","code":"LER x\nA ← 3 × x\nB ← 5 + 2 × x\nSE A < B ENTÃO ESCREVER A\nSENÃO ESCREVER B","x":6,"concept":"menor custo","challenge":"escolher o menor custo entre 4 × x e 8 + 2 × x","run":[0,3,6,9,12,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65],"tests":[[0,0],[6,20],[8,24]],"solution":"LER x\nA ← 4 × x\nB ← 8 + 2 × x\nSE A < B ENTÃO ESCREVER A\nSENÃO ESCREVER B","topic":"Decisão"},{"title":"Par ou ímpar","label":"número","code":"LER x\nSE x MOD 2 = 0 ENTÃO\n  ESCREVER 1\nSENÃO\n  ESCREVER 0","x":7,"concept":"resto da divisão (MOD)","challenge":"indicar com 1 os múltiplos de 3 e com 0 os restantes números","run":[1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1],"tests":[[0,1],[7,0],[9,1]],"solution":"LER x\nSE x MOD 3 = 0 ENTÃO\n  ESCREVER 1\nSENÃO\n  ESCREVER 0","topic":"Decisão"},{"title":"Desconto por escalões","label":"valor da compra","code":"LER x\nSE x >= 20 ENTÃO\n  d ← 10\nSENÃO SE x >= 10 ENTÃO\n  d ← 5\nSENÃO\n  d ← 0\nESCREVER x - d","x":10,"concept":"ordem das condições","challenge":"aplicar 3 € de desconto a compras a partir de 15 € e 8 € a partir de 25 €, escrevendo o valor a pagar","run":[0,1,2,3,4,5,6,7,8,9,5,6,7,8,9,10,11,12,13,14,10,11,12,13,14,15,16,17,18,19,20],"tests":[[14,14],[15,12],[25,17]],"solution":"LER x\nSE x >= 25 ENTÃO\n  d ← 8\nSENÃO SE x >= 15 ENTÃO\n  d ← 3\nSENÃO\n  d ← 0\nESCREVER x - d","topic":"Decisão"},{"title":"Contar divisores","label":"número","code":"LER x\nc ← 0\nPARA i DE 1 ATÉ x\n  SE x MOD i = 0 ENTÃO\n    c ← c + 1\nESCREVER c","x":12,"concept":"contador dentro de um ciclo","challenge":"somar todos os divisores de x","run":[0,1,2,2,3,2,4,2,4,3,4,2,6,2,4,4,5,2,6,2,6,4,4,2,8,3,4,4,6,2,8],"tests":[[0,0],[6,12],[7,8]],"solution":"LER x\ns ← 0\nPARA i DE 1 ATÉ x\n  SE x MOD i = 0 ENTÃO\n    s ← s + i\nESCREVER s","topic":"Repetição"},{"title":"Duplicar até passar","label":"limite","code":"LER x\np ← 1\nn ← 0\nENQUANTO p <= x\n  p ← p × 2\n  n ← n + 1\nESCREVER n","x":8,"concept":"condição de paragem","challenge":"contar os algarismos de x usando DIV 10 (por exemplo, 25 tem 2 algarismos)","run":[0,1,2,2,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5],"tests":[[7,1],[10,2],[25,2]],"solution":"LER x\nn ← 0\nREPETIR\n  x ← x DIV 10\n  n ← n + 1\nATÉ x = 0\nESCREVER n","topic":"Repetição"}],["Sequência","Decisão","Repetição"]],["UC00606 · Programação estruturada",[{"title":"Leitura e cálculo","label":"quantidade","code":"int x; cin >> x;\ncout << x * 4;","x":3,"concept":"valor unitário","challenge":"calcular o preço de x artigos a 7 €","run":[0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120],"tests":[[0,0],[3,21],[5,35]],"solution":"#include <iostream>\nusing namespace std;\nint main() {\n  int x;\n  cin >> x;\n  cout << x * 7 << endl;\n  return 0;\n}","topic":"Sequência e operadores"},{"title":"Divisão inteira","label":"peças","code":"int x; cin >> x;\ncout << x / 4;","x":11,"concept":"capacidade da caixa","challenge":"mostrar quantas peças sobram depois de encher caixas de quatro","run":[0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,6,6,6,6,7,7,7],"tests":[[0,0],[11,3],[13,1]],"solution":"int x; cin >> x;\ncout << x % 4;","topic":"Sequência e operadores"},{"title":"Decisão com if","label":"idade","code":"int x; cin >> x;\nif (x >= 16) cout << 1;\nelse cout << 0;","x":16,"concept":"idade mínima","challenge":"permitir a entrada apenas a partir dos 18 anos, mostrando 1 ou 0","run":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"tests":[[0,0],[16,0],[18,1]],"solution":"int x; cin >> x;\nif (x >= 18) cout << 1;\nelse cout << 0;","topic":"Decisão"},{"title":"Menu com switch","label":"opção","code":"int x; cin >> x;\nswitch (x) {\n case 1: cout << 10; break;\n case 2: cout << 20; break;\n default: cout << 0;\n}","x":2,"concept":"ramo default","challenge":"criar um menu em que 1 devolve 5, 2 devolve 8 e outras opções devolvem 0","run":[0,10,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"tests":[[1,5],[2,8],[4,0]],"solution":"int x; cin >> x;\nswitch (x) {\n case 1: cout << 5; break;\n case 2: cout << 8; break;\n default: cout << 0;\n}","topic":"Decisão"},{"title":"Repetir com while","label":"saldo","code":"int x; cin >> x;\nint n=0;\nwhile (x >= 3) { x -= 3; n++; }\ncout << n;","x":10,"concept":"contador","challenge":"contar compras de 4 € que cabem no saldo","run":[0,0,0,1,1,1,2,2,2,3,3,3,4,4,4,5,5,5,6,6,6,7,7,7,8,8,8,9,9,9,10],"tests":[[0,0],[10,2],[12,3]],"solution":"int x; cin >> x;\nint n = 0;\nwhile (x >= 4) {\n  x -= 4;\n  n++;\n}\ncout << n;","topic":"Repetição"},{"title":"Acumular com for","label":"limite","code":"int x; cin >> x;\nint s=0;\nfor(int i=1;i<=x;i++) s+=i;\ncout << s;","x":5,"concept":"limite inclusivo","challenge":"calcular a soma dos inteiros de zero até x, excluindo x","run":[0,1,3,6,10,15,21,28,36,45,55,66,78,91,105,120,136,153,171,190,210,231,253,276,300,325,351,378,406,435,465],"tests":[[0,0],[5,10],[7,21]],"solution":"int x; cin >> x;\nint s = 0;\nfor (int i = 0; i < x; i++) s += i;\ncout << s;","topic":"Repetição"},{"title":"Operadores lógicos","label":"valor","code":"int x; cin >> x;\nif (x >= 10 && x <= 20) cout << 1;\nelse cout << 0;","x":20,"concept":"intervalo fechado (&&)","challenge":"mostrar 1 quando x está fora do intervalo de 5 a 15 (inclusive) e 0 caso contrário","run":[0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0],"tests":[[4,1],[5,0],[16,1]],"solution":"int x; cin >> x;\nif (x < 5 || x > 15) cout << 1;\nelse cout << 0;","topic":"Decisão"},{"title":"Repetir com do…while","label":"número","code":"int x; cin >> x;\nint n = 0;\ndo {\n  n++;\n  x = x / 2;\n} while (x > 0);\ncout << n;","x":8,"concept":"o ciclo executa pelo menos uma vez","challenge":"contar os algarismos de x, incluindo o caso x = 0 (que tem 1 algarismo)","run":[1,1,2,2,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5],"tests":[[0,1],[9,1],[25,2]],"solution":"int x; cin >> x;\nint n = 0;\ndo {\n  n++;\n  x = x / 10;\n} while (x > 0);\ncout << n;","topic":"Repetição"},{"title":"Ciclos encaixados","label":"limite","code":"int x; cin >> x;\nint c = 0;\nfor (int i = 1; i <= x; i++)\n  for (int j = 1; j <= i; j++)\n    c++;\ncout << c;","x":4,"concept":"o ciclo interior depende do exterior","challenge":"contar todos os pares (i, j) com i e j entre 1 e x, usando dois ciclos","run":[0,1,3,6,10,15,21,28,36,45,55,66,78,91,105,120,136,153,171,190,210,231,253,276,300,325,351,378,406,435,465],"tests":[[0,0],[3,9],[5,25]],"solution":"int x; cin >> x;\nint c = 0;\nfor (int i = 1; i <= x; i++)\n  for (int j = 1; j <= x; j++)\n    c++;\ncout << c;","topic":"Repetição"},{"title":"Algarismos com % e /","label":"número","code":"int x; cin >> x;\nint s = 0;\nwhile (x > 0) {\n  s += x % 10;\n  x /= 10;\n}\ncout << s;","x":29,"concept":"extrair o último algarismo","challenge":"inverter os algarismos de x (por exemplo, 25 passa a 52 e 30 passa a 3)","run":[0,1,2,3,4,5,6,7,8,9,1,2,3,4,5,6,7,8,9,10,2,3,4,5,6,7,8,9,10,11,3],"tests":[[7,7],[25,52],[30,3]],"solution":"int x; cin >> x;\nint r = 0;\nwhile (x > 0) {\n  r = r * 10 + x % 10;\n  x /= 10;\n}\ncout << r;","topic":"Repetição"}],["Sequência e operadores","Decisão","Repetição"]],["UC00607 · Programas complexos",[{"title":"Índices e atualizações","label":"novo valor","code":"int x; cin >> x;\nint a[]={3,5,7};\na[1]=x;\ncout << a[0]+a[1];","x":9,"concept":"posição alterada","challenge":"substituir o último elemento por x e somar os três elementos","run":[3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33],"tests":[[0,8],[9,17],[11,19]],"solution":"int x; cin >> x;\nint a[] = {3, 5, 7};\na[2] = x;\ncout << a[0] + a[1] + a[2];","topic":"Vetores"},{"title":"Acumulador e média","label":"terceira nota","code":"int x; cin >> x;\nint a[]={8,12,x}, s=0;\nfor(int v:a) s+=v;\ncout << s;","x":10,"concept":"soma antes da divisão","challenge":"calcular a média das notas 9, 12 e x por divisão real","run":[20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50],"tests":[[0,7],[10,10.333333333333334],[12,11]],"solution":"int x; cin >> x;\nint a[] = {9, 12, x};\nint s = 0;\nfor (int v : a) s += v;\ndouble m = s / 3.0;\ncout << m;","topic":"Vetores"},{"title":"Contagem condicional","label":"nota intermédia","code":"int x; cin >> x;\nint a[]={9,x,18}, n=0;\nfor(int v:a) if(v>=10) n++;\ncout << n;","x":10,"concept":"inclusão do limite","challenge":"contar as notas abaixo de 10 no mesmo array","run":[1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"tests":[[0,2],[10,1],[12,1]],"solution":"int x; cin >> x;\nint a[] = {9, x, 18}, n = 0;\nfor (int v : a) if (v < 10) n++;\ncout << n;","topic":"Vetores"},{"title":"Máximo e empates","label":"nota central","code":"int x; cin >> x;\nint a[]={12,x,12}, pos=0;\nfor(int i=1;i<3;i++)\n if(a[i]>a[pos]) pos=i;\ncout << pos;","x":12,"concept":"comparação estrita","challenge":"devolver o índice da última ocorrência do máximo","run":[0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"tests":[[0,2],[12,2],[14,1]],"solution":"int x; cin >> x;\nint a[] = {12, x, 12}, pos = 0;\nfor (int i = 1; i < 3; i++)\n  if (a[i] >= a[pos]) pos = i;\ncout << pos;","topic":"Vetores"},{"title":"Validação das entradas","label":"primeira tentativa","code":"int x; cin >> x;\nint tentativas[]={x,14};\nfor(int v:tentativas)\n if(v>=0 && v<=20){cout << v; break;}","x":21,"concept":"intervalo permitido","challenge":"aceitar apenas valores de 1 a 19 e usar a segunda tentativa válida, 14, se necessário","run":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,14,14,14,14,14,14,14,14,14,14],"tests":[[0,14],[7,7],[20,14]],"solution":"int x; cin >> x;\nint t[] = {x, 14};\nfor (int v : t)\n  if (v >= 1 && v <= 19) { cout << v; break; }","topic":"Vetores"},{"title":"Gestor de classificações","label":"quinta nota","code":"int x; cin >> x;\nint a[]={12,8,15,9,x}, menor=a[0];\nfor(int v:a) if(v<menor) menor=v;\ncout << menor;","x":6,"concept":"inicialização do mínimo","challenge":"calcular a amplitude (máximo menos mínimo) das mesmas cinco notas","run":[0,1,2,3,4,5,6,7,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8],"tests":[[0,15],[6,9],[8,7]],"solution":"int x; cin >> x;\nint a[] = {12, 8, 15, 9, x};\nint menor = a[0], maior = a[0];\nfor (int v : a) {\n  if (v < menor) menor = v;\n  if (v > maior) maior = v;\n}\ncout << maior - menor;","topic":"Vetores"},{"title":"Pesquisa linear","label":"valor procurado","code":"int x; cin >> x;\nint a[] = {4, 8, 15, 16, 23};\nint pos = -1;\nfor (int i = 0; i < 5; i++)\n  if (a[i] == x) pos = i;\ncout << pos;","x":15,"concept":"valor sentinela −1 (não encontrado)","challenge":"contar quantos elementos do mesmo vetor são maiores do que x","run":[-1,-1,-1,-1,0,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,2,3,-1,-1,-1,-1,-1,-1,4,-1,-1,-1,-1,-1,-1,-1],"tests":[[0,5],[15,2],[23,0]],"solution":"int x; cin >> x;\nint a[] = {4, 8, 15, 16, 23};\nint c = 0;\nfor (int v : a)\n  if (v > x) c++;\ncout << c;","topic":"Vetores"},{"title":"Inverter um vetor","label":"primeiro elemento","code":"int x; cin >> x;\nint a[] = {x, 2, 3, 4};\nint b[4];\nfor (int i = 0; i < 4; i++)\n  b[i] = a[3 - i];\ncout << b[0] * 10 + b[3];","x":1,"concept":"índice simétrico (3 − i)","challenge":"rodar o vetor uma posição para a esquerda ({x, 2, 3, 4} passa a {2, 3, 4, x}) e mostrar b[0] × 10 + b[3]","run":[40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70],"tests":[[0,20],[5,25],[9,29]],"solution":"int x; cin >> x;\nint a[] = {x, 2, 3, 4};\nint b[4];\nfor (int i = 0; i < 4; i++)\n  b[i] = a[(i + 1) % 4];\ncout << b[0] * 10 + b[3];","topic":"Vetores"},{"title":"Trocar e ordenar","label":"primeiro elemento","code":"int x; cin >> x;\nint a[] = {x, 9};\nif (a[0] > a[1]) {\n  int t = a[0];\n  a[0] = a[1];\n  a[1] = t;\n}\ncout << a[0];","x":12,"concept":"variável temporária na troca","challenge":"ordenar o vetor {x, 9, 4} por ordem crescente e mostrar o elemento do meio","run":[0,1,2,3,4,5,6,7,8,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9],"tests":[[0,4],[6,6],[12,9]],"solution":"int x; cin >> x;\nint a[] = {x, 9, 4};\nfor (int k = 0; k < 2; k++)\n  for (int i = 0; i < 2; i++)\n    if (a[i] > a[i + 1]) {\n      int t = a[i];\n      a[i] = a[i + 1];\n      a[i + 1] = t;\n    }\ncout << a[1];","topic":"Vetores"},{"title":"Vetor de contagens","label":"valor","code":"int x; cin >> x;\nint c[3] = {0, 0, 0};\nint d[] = {x % 3, 1, 2, 1};\nfor (int v : d) c[v]++;\ncout << c[1];","x":4,"concept":"usar um valor como índice","challenge":"mostrar c[0] × 100 + c[1] × 10 + c[2] para o mesmo vetor d","run":[2,3,2,2,3,2,2,3,2,2,3,2,2,3,2,2,3,2,2,3,2,2,3,2,2,3,2,2,3,2,2],"tests":[[3,121],[4,31],[5,22]],"solution":"int x; cin >> x;\nint c[3] = {0, 0, 0};\nint d[] = {x % 3, 1, 2, 1};\nfor (int v : d) c[v]++;\ncout << c[0] * 100 + c[1] * 10 + c[2];","topic":"Vetores"},{"title":"Contar uma letra","label":"número de caracteres a analisar","code":"int x; cin >> x;\nstring s = \"programar\";\nint n = 0;\nfor (int i = 0; i < x && i < s.length(); i++)\n  if (s[i] == 'r') n++;\ncout << n;","x":5,"concept":"s.length() e s[i]","challenge":"contar as vogais (a, e, i, o, u) nos primeiros x caracteres da mesma string","run":[0,0,1,1,1,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"tests":[[0,0],[5,1],[30,3]],"solution":"int x; cin >> x;\nstring s = \"programar\";\nint n = 0;\nfor (int i = 0; i < x && i < s.length(); i++) {\n  char c = s[i];\n  if (c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u') n++;\n}\ncout << n;","topic":"Strings"},{"title":"Códigos dos caracteres","label":"deslocamento","code":"int x; cin >> x;\nchar c = 'a' + x % 26;\ncout << (int)c;","x":1,"concept":"um char é um código numérico","challenge":"calcular a posição no alfabeto (a = 1) da letra que fica x posições depois de 'z', dando a volta ao alfabeto","run":[97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,97,98,99,100,101],"tests":[[0,26],[1,1],[28,2]],"solution":"int x; cin >> x;\nchar c = 'a' + (25 + x) % 26;\ncout << c - 'a' + 1;","topic":"Strings"},{"title":"Algarismos como texto","label":"número","code":"int x; cin >> x;\nstring s = to_string(x);\nint ok = 1;\nfor (int i = 0; i < s.length() / 2; i++)\n  if (s[i] != s[s.length() - 1 - i]) ok = 0;\ncout << ok;","x":22,"concept":"comparar posições simétricas","challenge":"contar quantos algarismos de x são iguais ao primeiro algarismo (por exemplo, 121 tem 2)","run":[1,1,1,1,1,1,1,1,1,1,0,1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0],"tests":[[3,1],[121,2],[2222,4]],"solution":"int x; cin >> x;\nstring s = to_string(x);\nint n = 0;\nfor (int i = 0; i < s.length(); i++)\n  if (s[i] == s[0]) n++;\ncout << n;","topic":"Strings"},{"title":"Maiúsculas e minúsculas","label":"número de caracteres","code":"int x; cin >> x;\nstring s = \"Lab de Prog\";\nstring r = s.substr(0, x);\nint n = 0;\nfor (char c : r)\n  if (isupper(c)) n++;\ncout << n;","x":5,"concept":"substr e as funções de <cctype>","challenge":"contar quantos dos primeiros x caracteres mudariam ao passar para maiúsculas (com toupper)","run":[0,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"tests":[[0,0],[5,3],[30,7]],"solution":"int x; cin >> x;\nstring s = \"Lab de Prog\";\nstring r = s.substr(0, x);\nint n = 0;\nfor (char c : r)\n  if (toupper(c) != c) n++;\ncout << n;","topic":"Strings"},{"title":"Percorrer uma matriz","label":"valor na posição [1][1]","code":"int x; cin >> x;\nint m[2][3] = {{1, 2, 3}, {4, x, 6}};\nint s = 0;\nfor (int i = 0; i < 2; i++)\n  for (int j = 0; j < 3; j++)\n    s += m[i][j];\ncout << s;","x":5,"concept":"linha i, coluna j","challenge":"somar apenas os elementos da segunda coluna (j = 1)","run":[16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46],"tests":[[0,2],[5,7],[9,11]],"solution":"int x; cin >> x;\nint m[2][3] = {{1, 2, 3}, {4, x, 6}};\nint s = 0;\nfor (int i = 0; i < 2; i++)\n  s += m[i][1];\ncout << s;","topic":"Matrizes"},{"title":"Diagonal principal","label":"valor nos cantos esquerdos","code":"int x; cin >> x;\nint m[3][3] = {{x, 1, 2}, {3, 4, 5}, {x, 7, 8}};\nint d = 0;\nfor (int i = 0; i < 3; i++)\n  d += m[i][i];\ncout << d;","x":3,"concept":"na diagonal principal, i é igual a j","challenge":"somar a diagonal secundária (m[0][2], m[1][1] e m[2][0])","run":[12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42],"tests":[[0,6],[3,9],[10,16]],"solution":"int x; cin >> x;\nint m[3][3] = {{x, 1, 2}, {3, 4, 5}, {x, 7, 8}};\nint d = 0;\nfor (int i = 0; i < 3; i++)\n  d += m[i][2 - i];\ncout << d;","topic":"Matrizes"},{"title":"Máximo numa matriz","label":"valor na posição [0][1]","code":"int x; cin >> x;\nint m[2][3] = {{5, x, 2}, {7, 1, 9}};\nint maior = m[0][0];\nfor (int i = 0; i < 2; i++)\n  for (int j = 0; j < 3; j++)\n    if (m[i][j] > maior) maior = m[i][j];\ncout << maior;","x":12,"concept":"começar com um elemento da própria matriz","challenge":"mostrar o índice da linha com a maior soma (0 ou 1); em caso de empate, mostrar 0","run":[9,9,9,9,9,9,9,9,9,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30],"tests":[[9,1],[10,0],[20,0]],"solution":"int x; cin >> x;\nint m[2][3] = {{5, x, 2}, {7, 1, 9}};\nint s0 = 0, s1 = 0;\nfor (int j = 0; j < 3; j++) {\n  s0 += m[0][j];\n  s1 += m[1][j];\n}\nif (s1 > s0) cout << 1;\nelse cout << 0;","topic":"Matrizes"},{"title":"Matriz transposta","label":"valor na posição [1][2]","code":"int x; cin >> x;\nint a[2][3] = {{1, 2, 3}, {4, 5, x}};\nint t[3][2];\nfor (int i = 0; i < 2; i++)\n  for (int j = 0; j < 3; j++)\n    t[j][i] = a[i][j];\ncout << t[2][1] * 10 + t[0][1];","x":7,"concept":"trocar linhas com colunas","challenge":"espelhar a matriz na horizontal (b[i][j] = a[i][2 − j]) e mostrar b[1][0] × 10 + b[0][0]","run":[4,14,24,34,44,54,64,74,84,94,104,114,124,134,144,154,164,174,184,194,204,214,224,234,244,254,264,274,284,294,304],"tests":[[0,3],[5,53],[9,93]],"solution":"int x; cin >> x;\nint a[2][3] = {{1, 2, 3}, {4, 5, x}};\nint b[2][3];\nfor (int i = 0; i < 2; i++)\n  for (int j = 0; j < 3; j++)\n    b[i][j] = a[i][2 - j];\ncout << b[1][0] * 10 + b[0][0];","topic":"Matrizes"},{"title":"Registo de aluno","label":"pontos extra","code":"struct Aluno {\n  string nome;\n  int nota;\n};\n\nint main() {\n  int x; cin >> x;\n  Aluno a = {\"Ana\", 12};\n  a.nota = a.nota + x;\n  cout << a.nota;\n}","x":3,"concept":"aceder a um campo com o ponto","challenge":"definir um registo Produto com os campos preco e quantidade, criar um produto com preço 4 e quantidade x e mostrar o total (preço × quantidade)","run":[12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42],"tests":[[0,0],[3,12],[7,28]],"solution":"struct Produto {\n  int preco;\n  int quantidade;\n};\n\nint main() {\n  int x; cin >> x;\n  Produto p = {4, x};\n  cout << p.preco * p.quantidade;\n}","topic":"Estruturas (struct)"},{"title":"Vetor de registos","label":"nota do Rui","code":"struct Aluno {\n  string nome;\n  int nota;\n};\n\nint main() {\n  int x; cin >> x;\n  Aluno t[3] = {{\"Ana\", 12}, {\"Rui\", x}, {\"Eva\", 15}};\n  int s = 0;\n  for (int i = 0; i < 3; i++)\n    s += t[i].nota;\n  cout << s;\n}","x":9,"concept":"t[i].campo","challenge":"contar os alunos aprovados (nota maior ou igual a 10)","run":[27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57],"tests":[[0,2],[10,3],[9,2]],"solution":"struct Aluno {\n  string nome;\n  int nota;\n};\n\nint main() {\n  int x; cin >> x;\n  Aluno t[3] = {{\"Ana\", 12}, {\"Rui\", x}, {\"Eva\", 15}};\n  int n = 0;\n  for (int i = 0; i < 3; i++)\n    if (t[i].nota >= 10) n++;\n  cout << n;\n}","topic":"Estruturas (struct)"},{"title":"Procurar num vetor de registos","label":"nota do Rodrigo","code":"struct Aluno {\n  string nome;\n  int nota;\n};\n\nint main() {\n  int x; cin >> x;\n  Aluno t[3] = {{\"Ana\", 12}, {\"Rodrigo\", x}, {\"Beatriz\", 15}};\n  int m = 0;\n  for (int i = 1; i < 3; i++)\n    if (t[i].nota > t[m].nota) m = i;\n  cout << m;\n}","x":14,"concept":"guardar a posição do melhor registo","challenge":"mostrar o número de letras do nome do aluno com a nota mais baixa (em caso de empate, o primeiro)","run":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"tests":[[0,7],[12,3],[20,3]],"solution":"struct Aluno {\n  string nome;\n  int nota;\n};\n\nint main() {\n  int x; cin >> x;\n  Aluno t[3] = {{\"Ana\", 12}, {\"Rodrigo\", x}, {\"Beatriz\", 15}};\n  int m = 0;\n  for (int i = 1; i < 3; i++)\n    if (t[i].nota < t[m].nota) m = i;\n  cout << t[m].nome.length();\n}","topic":"Estruturas (struct)"},{"title":"Copiar registos","label":"nova coluna","code":"struct Ponto {\n  int col;\n  int lin;\n};\n\nint main() {\n  int x; cin >> x;\n  Ponto a = {1, 2};\n  Ponto b = a;\n  b.col = x;\n  cout << a.col * 10 + b.col;\n}","x":5,"concept":"a atribuição copia o registo inteiro","challenge":"calcular a distância de Manhattan entre a = {1, 2} e b = {x, 6}, isto é, |col1 − col2| + |lin1 − lin2|","run":[10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40],"tests":[[0,5],[1,4],[7,10]],"solution":"struct Ponto {\n  int col;\n  int lin;\n};\n\nint main() {\n  int x; cin >> x;\n  Ponto a = {1, 2};\n  Ponto b = {x, 6};\n  cout << abs(a.col - b.col) + abs(a.lin - b.lin);\n}","topic":"Estruturas (struct)"},{"title":"Funções e recursão","label":"n","code":"int soma(int n) {\n  if (n == 0) return 0;\n  return n + soma(n - 1);\n}\n\nint main() {\n  int x; cin >> x;\n  cout << soma(x);\n}","x":4,"concept":"o caso de paragem da recursão","challenge":"escrever uma função recursiva int potencia2(int n) que calcula 2 elevado a n e mostrar potencia2(x)","run":[0,1,3,6,10,15,21,28,36,45,55,66,78,91,105,120,136,153,171,190,210,231,253,276,300,325,351,378,406,435,465],"tests":[[0,1],[3,8],[10,1024]],"solution":"int potencia2(int n) {\n  if (n == 0) return 1;\n  return 2 * potencia2(n - 1);\n}\n\nint main() {\n  int x; cin >> x;\n  cout << potencia2(x);\n}","topic":"Funções e apontadores"},{"title":"Endereço e conteúdo","label":"valor a somar","code":"int x; cin >> x;\nint a = 5;\nint *p = &a;\n*p = *p + x;\ncout << a;","x":3,"concept":"*p altera a variável apontada","challenge":"com p a apontar para a = 5 e q a apontar para b = x, trocar os valores de a e b usando só p e q, e mostrar a × 10 + b","run":[5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35],"tests":[[0,5],[3,35],[9,95]],"solution":"int x; cin >> x;\nint a = 5, b = x;\nint *p = &a, *q = &b;\nint t = *p;\n*p = *q;\n*q = t;\ncout << a * 10 + b;","topic":"Funções e apontadores"},{"title":"Apontadores e vetores","label":"deslocamento","code":"int x; cin >> x;\nint v[] = {10, 20, 30, 40};\nint *p = v;\np = p + x % 4;\ncout << *p;","x":1,"concept":"aritmética de apontadores (p + k)","challenge":"somar os elementos do vetor desde a posição x % 4 até ao fim, percorrendo-o só com um apontador (p++)","run":[10,20,30,40,10,20,30,40,10,20,30,40,10,20,30,40,10,20,30,40,10,20,30,40,10,20,30,40,10,20,30],"tests":[[0,100],[1,90],[7,40]],"solution":"int x; cin >> x;\nint v[] = {10, 20, 30, 40};\nint s = 0;\nfor (int *p = v + x % 4; p < v + 4; p++)\n  s += *p;\ncout << s;","topic":"Funções e apontadores"},{"title":"Passagem por referência","label":"valor inicial","code":"void dobrar(int &n) {\n  n = n * 2;\n}\n\nint main() {\n  int x; cin >> x;\n  dobrar(x);\n  dobrar(x);\n  cout << x;\n}","x":3,"concept":"com & a função altera a variável original","challenge":"escrever void troca(int &a, int &b) e usá-la para pôr a = x e b = 10 por ordem crescente, mostrando a × 100 + b","run":[0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120],"tests":[[3,310],[10,1010],[15,1015]],"solution":"void troca(int &a, int &b) {\n  int t = a;\n  a = b;\n  b = t;\n}\n\nint main() {\n  int x; cin >> x;\n  int a = x, b = 10;\n  if (a > b) troca(a, b);\n  cout << a * 100 + b;\n}","topic":"Funções e apontadores"},{"title":"Funções com apontadores","label":"número de chamadas","code":"void incrementa(int *p) {\n  (*p)++;\n}\n\nint main() {\n  int x; cin >> x;\n  int c = 0;\n  for (int i = 0; i < x; i++)\n    incrementa(&c);\n  cout << c;\n}","x":4,"concept":"passar o endereço (&c) para a função alterar c","challenge":"escrever void minmax(int v[], int n, int *mn, int *mx) que calcula o mínimo e o máximo de {7, x, 3, 9} e mostrar máximo − mínimo","run":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30],"tests":[[0,9],[5,6],[20,17]],"solution":"void minmax(int v[], int n, int *mn, int *mx) {\n  *mn = v[0];\n  *mx = v[0];\n  for (int i = 1; i < n; i++) {\n    if (v[i] < *mn) *mn = v[i];\n    if (v[i] > *mx) *mx = v[i];\n  }\n}\n\nint main() {\n  int x; cin >> x;\n  int v[] = {7, x, 3, 9};\n  int a, b;\n  minmax(v, 4, &a, &b);\n  cout << b - a;\n}","topic":"Funções e apontadores"},{"title":"Memória dinâmica","label":"valor","code":"int x; cin >> x;\nint n = x % 5 + 1;\nint *v = new int[n];\nfor (int i = 0; i < n; i++)\n  v[i] = i * i;\ncout << v[n - 1];\ndelete[] v;","x":3,"concept":"new reserva memória durante a execução","challenge":"reservar com new um vetor de x + 1 posições, guardar v[i] = 2 × i e mostrar a soma dos elementos","run":[0,1,4,9,16,0,1,4,9,16,0,1,4,9,16,0,1,4,9,16,0,1,4,9,16,0,1,4,9,16,0],"tests":[[0,0],[3,12],[10,110]],"solution":"int x; cin >> x;\nint *v = new int[x + 1];\nint s = 0;\nfor (int i = 0; i <= x; i++) {\n  v[i] = 2 * i;\n  s += v[i];\n}\ncout << s;\ndelete[] v;","topic":"Funções e apontadores"},{"title":"Ler números de um ficheiro","label":"valor inicial","code":"int x; cin >> x;\nifstream f(\"notas.txt\");\nint v, s = x;\nwhile (f >> v)\n  s += v;\nf.close();\ncout << s;","x":0,"concept":"while (f >> v) lê até ao fim do ficheiro","challenge":"contar quantas notas do ficheiro são maiores ou iguais a x","run":[36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66],"tests":[[0,3],[12,2],[16,0]],"solution":"int x; cin >> x;\nifstream f(\"notas.txt\");\nint v, n = 0;\nwhile (f >> v)\n  if (v >= x) n++;\nf.close();\ncout << n;","topic":"Ficheiros","files":{"notas.txt":"12 15 9\n"}},{"title":"Escrever num ficheiro","label":"limite","code":"int x; cin >> x;\nofstream f(\"saida.txt\");\nfor (int i = 1; i <= x; i++)\n  f << i << \" \";\nf.close();\nifstream g(\"saida.txt\");\nint v, n = 0;\nwhile (g >> v) n++;\ncout << n;","x":4,"concept":"ofstream cria o ficheiro; close() grava-o","challenge":"escrever no ficheiro os múltiplos de 3 até x, voltar a lê-lo e mostrar a soma dos valores lidos","run":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30],"tests":[[0,0],[10,18],[12,30]],"solution":"int x; cin >> x;\nofstream f(\"saida.txt\");\nfor (int i = 3; i <= x; i += 3)\n  f << i << \" \";\nf.close();\nifstream g(\"saida.txt\");\nint v, s = 0;\nwhile (g >> v) s += v;\ncout << s;","topic":"Ficheiros","files":{}},{"title":"eof() e o último valor","label":"valor a somar","code":"int x; cin >> x;\nifstream f(\"dados.txt\");\nint v = 0, n = 0;\nwhile (!f.eof()) {\n  f >> v;\n  n++;\n}\ncout << n + x;","x":0,"concept":"eof() só fica verdadeiro depois de uma leitura falhar","challenge":"contar corretamente quantos valores tem o ficheiro e mostrar essa contagem × 10 + x","run":[4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34],"tests":[[0,30],[5,35],[9,39]],"solution":"int x; cin >> x;\nifstream f(\"dados.txt\");\nint v, n = 0;\nwhile (f >> v)\n  n++;\ncout << n * 10 + x;","topic":"Ficheiros","files":{"dados.txt":"4 7 1\n"}},{"title":"Linhas de texto","label":"comprimento mínimo","code":"int x; cin >> x;\nifstream f(\"nomes.txt\");\nstring linha;\nint n = 0;\nwhile (getline(f, linha))\n  if (linha.length() > x) n++;\ncout << n;","x":3,"concept":"getline lê uma linha inteira","challenge":"mostrar o total de caracteres das linhas do ficheiro que têm pelo menos x caracteres","run":[3,3,3,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"tests":[[3,13],[4,7],[8,0]],"solution":"int x; cin >> x;\nifstream f(\"nomes.txt\");\nstring linha;\nint t = 0;\nwhile (getline(f, linha))\n  if (linha.length() >= x) t += linha.length();\ncout << t;","topic":"Ficheiros","files":{"nomes.txt":"Ana\nRodrigo\nEva\n"}}],["Strings","Vetores","Matrizes","Estruturas (struct)","Funções e apontadores","Ficheiros"]]];
 /* ===== CONFIGURAÇÃO: altere aqui ===== */
 const CONFIG = {
   marca: 'Laboratório de Programação',
@@ -888,6 +1477,8 @@ const CONFIG = {
   const doneArr = (k = key()) => (S.done[k] = S.done[k] || [false, false, false, false, false]);
   const isDone = (a, b) => !!(S.done[key(a, b)] && S.done[key(a, b)][4]);
   const modY = () => Math.min(30, task.x + 1);
+  const topics = ui => data[ui][2] || [];
+  const order = ui => data[ui][1].map((t, i) => i).sort((p, q) => (topics(ui).indexOf(data[ui][1][p].topic) - topics(ui).indexOf(data[ui][1][q].topic)) || p - q);
   const stat = (k = key()) => (S.stats[k] = S.stats[k] || { tentativas: 0, pistas: 0, solucao: false });
   const num = s => Number(String(s).trim().replace(',', '.'));
   let criarTries = 0;
@@ -902,7 +1493,7 @@ const CONFIG = {
 
   function refreshMeta() {
     const tasks = data[u][1];
-    [...el('challenge').options].forEach((o, i) => { o.textContent = (isDone(u, i) ? '✓ ' : '') + tasks[i].title; });
+    [...el('challenge').options].forEach(o => { const i = +o.value; o.textContent = (isDone(u, i) ? '✓ ' : '') + tasks[i].title; });
     [...el('unit').options].forEach((o, i) => { const n = data[i][1].filter((_, j) => isDone(i, j)).length; o.textContent = data[i][0] + (n ? ` (${n}/${data[i][1].length})` : ''); });
     const n = tasks.filter((_, i) => isDone(u, i)).length;
     el('progText').textContent = `${n} de ${tasks.length} desafios concluídos nesta unidade`;
@@ -918,7 +1509,15 @@ const CONFIG = {
   }
 
   function fillUnits() { el('unit').replaceChildren(...data.map((g, i) => new Option(g[0], i))); }
-  function fillChallenges() { el('challenge').replaceChildren(...data[u][1].map((t, i) => new Option(t.title, i))); }
+  function fillChallenges() {
+    const sel = el('challenge'), groups = new Map();
+    sel.replaceChildren();
+    order(u).forEach(i => {
+      const t = data[u][1][i], name = t.topic || 'Desafios';
+      if (!groups.has(name)) { const g = document.createElement('optgroup'); g.label = (topics(u).indexOf(name) + 1) + '. ' + name; groups.set(name, g); sel.append(g); }
+      groups.get(name).append(new Option(t.title, i));
+    });
+  }
 
   function open(nu, nc, ns = 0) {
     if (nu !== u || !el('challenge').options.length) { u = nu; el('unit').value = u; fillChallenges(); }
@@ -929,6 +1528,11 @@ const CONFIG = {
     render();
   }
 
+  function filesHTML(files, title, before) {
+    const names = Object.keys(files);
+    if (!names.length) return before ? '' : '<p class="note">Este programa começa sem ficheiros: cria-os ao executar.</p>';
+    return names.map(n => `<div class="file"><div class="fname">${esc(title)}: <code>${esc(n)}</code></div><pre>${esc(files[n] === '' ? '(vazio)' : files[n])}</pre></div>`).join('');
+  }
   function codeHTML(src) { return src.split('\n').map(l => '<span>' + esc(l || ' ') + '</span>').join(''); }
 
   function setFeedback(msg, kind) { const f = el('feedback'); f.className = 'feedback' + (kind ? ' ' + kind : ''); f.innerHTML = msg; }
@@ -939,6 +1543,7 @@ const CONFIG = {
     setFeedback(''); el('help').innerHTML = ''; el('extra').innerHTML = '';
     el('heading').textContent = task.title + ' · ' + phases[stage];
     el('code').innerHTML = codeHTML(task.code);
+    el('files').innerHTML = task.files ? filesHTML(task.files, 'Ficheiro usado pelo programa') : '';
     el('stages').replaceChildren(...phases.map((p, i) => {
       const li = document.createElement('li'), b = document.createElement('button');
       b.type = 'button'; b.innerHTML = `<span class="n">${i + 1}</span>${p}`;
@@ -949,7 +1554,7 @@ const CONFIG = {
     const lbl = `x representa ${task.label === 'quantidade' ? 'a quantidade' : 'o valor de «' + task.label + '»'}`;
     const y = modY();
     el('prompt').textContent = [
-      `Prevê a saída do programa quando x = ${task.x} (${lbl}).`,
+      `Prevê a saída do programa quando x = ${task.x} (${lbl}).` + (task.files ? ' O ficheiro que o programa lê está por baixo do código.' : ''),
       `Executa o programa com x = ${task.x} e compara com a tua previsão. Depois experimenta outros valores e observa o teste de mesa.`,
       `Indica a saída para x = 0 e explica no teu caderno o papel de «${task.concept}».`,
       `Altera a entrada de x = ${task.x} para x = ${y}. Prevê a nova saída antes de a confirmares na etapa Executar.`,
@@ -963,7 +1568,7 @@ const CONFIG = {
         <button class="b" type="submit">Testar a minha solução</button></form>
         <details class="syntax"><summary>Instruções aceites</summary>${lang() === 'pseudo'
           ? '<p><code>LER x</code> · <code>ESCREVER total</code> · <code>total ← x × 5</code> (também <code>&lt;-</code>, <code>*</code>, <code>/</code>, <code>DIV</code>, <code>MOD</code>) · <code>SE … ENTÃO / SENÃO</code> · <code>ENQUANTO … FAÇA</code> · <code>PARA i DE 1 ATÉ n [PASSO p]</code> · <code>REPETIR … ATÉ …</code>. Os blocos definem-se pela indentação ou fecham-se com <code>FIMSE</code>, <code>FIMENQUANTO</code>, <code>FIMPARA</code>. Comparações: <code>=</code>, <code>≠</code>/<code>&lt;&gt;</code>, <code>&lt;</code>, <code>≤</code>/<code>&lt;=</code>, … Operadores lógicos: <code>E</code>, <code>OU</code>, <code>NÃO</code>.</p>'
-          : '<p>C++ com <code>int</code>, <code>double</code>, <code>bool</code>, <code>string</code>, vetores (<code>int a[] = {1, 2};</code>), <code>cin</code>/<code>cout</code>, <code>if/else</code>, <code>switch</code>, <code>while</code>, <code>do…while</code>, <code>for</code> (incluindo <code>for (int v : a)</code>), <code>break</code>, <code>continue</code>, conversões <code>(double)</code> e funções <code>sqrt</code>, <code>pow</code>, <code>abs</code>, <code>max</code>, <code>min</code>. Pode escrever o programa completo com <code>int main()</code> ou só as instruções. A tecla Tab indenta; Esc seguido de Tab sai da caixa.</p>'}</details>`;
+          : '<p>C++ com <code>int</code>, <code>double</code>, <code>bool</code>, <code>string</code>, vetores (<code>int a[] = {1, 2};</code>), <code>cin</code>/<code>cout</code>, <code>if/else</code>, <code>switch</code>, <code>while</code>, <code>do…while</code>, <code>for</code> (incluindo <code>for (int v : a)</code>), <code>break</code>, <code>continue</code>, conversões <code>(double)</code>, funções <code>sqrt</code>, <code>pow</code>, <code>abs</code>, <code>max</code>, <code>min</code>; <code>string</code> e <code>char</code> (<code>s.length()</code>, <code>s[i]</code>, <code>substr</code>, <code>find</code>, <code>toupper</code>, <code>isdigit</code>, <code>to_string</code>…); matrizes (<code>int m[2][3]</code>); <code>struct</code>; funções próprias com parâmetros por valor, por referência (<code>&amp;</code>) e recursão; apontadores (<code>&amp;</code>, <code>*</code>, <code>-&gt;</code>, <code>new</code>/<code>delete</code>); ficheiros com <code>ifstream</code>/<code>ofstream</code>, <code>getline</code>, <code>eof()</code>, <code>close()</code>. Pode escrever o programa completo com <code>int main()</code> ou só as instruções. A tecla Tab indenta; Esc seguido de Tab sai da caixa.</p>'}</details>`;
       const ta = el('a');
       ta.value = S.code[key()] || '';
       let escMode = false;
@@ -989,7 +1594,9 @@ const CONFIG = {
     if (!trace.length) return '<p class="note">Sem passos para mostrar.</p>';
     const lines = src.split('\n'), cols = [];
     trace.forEach(r => Object.keys(r.vars).forEach(k => { if (!cols.includes(k)) cols.push(k); }));
-    const fmt = v => v === undefined ? '' : Array.isArray(v) ? '{' + v.map(x => x === undefined ? '?' : fmt(x)).join(', ') + '}' : typeof v === 'number' ? Lab.fmtNum(v) : typeof v === 'boolean' ? (v ? 'V' : 'F') : '"' + v + '"';
+    const fmt = v => v === undefined ? '' : v === null ? 'nullptr' : Array.isArray(v) ? '{' + v.map(x => x === undefined ? '?' : fmt(x)).join(', ') + '}'
+      : typeof v === 'object' ? (v.__ref !== undefined ? '→ ' + v.__ref : v.__file !== undefined ? 'ficheiro ' + v.__file : '{' + Object.keys(v).map(k => k + ': ' + (v[k] === undefined ? '?' : fmt(v[k]))).join(', ') + '}')
+      : typeof v === 'number' ? Lab.fmtNum(v) : typeof v === 'boolean' ? (v ? 'V' : 'F') : '"' + v + '"';
     let prev = {}, prevOut = 0;
     const rows = trace.slice(0, maxRows).map((r, i) => {
       const cells = cols.map(k => { const a = fmt(r.vars[k]), changed = a !== fmt(prev[k]); return `<td class="mono${changed && a !== '' ? ' chg' : ''}">${esc(a)}</td>`; }).join('');
@@ -1027,10 +1634,10 @@ const CONFIG = {
     const cmp = (answers[0] !== undefined && answers[0] !== '' && n === task.x) ? ` · A tua previsão: ${esc(answers[0])} ${num(answers[0]) === task.run[task.x] ? '✓' : '✗'}` : '';
     if (prog.ok) {
       if (!Number.isInteger(n) || Math.abs(n) > 100000) { setFeedback('Usa um número inteiro (até 100 000).', 'bad'); return; }
-      const r = Lab.run(prog, [n]);
+      const r = Lab.run(prog, [n], { files: task.files });
       if (r.error) { setFeedback('Erro na linha ' + r.line + ': ' + esc(r.error), 'bad'); }
       else setFeedback('Saída: ' + esc(r.output.trim() || '(nada)') + cmp, 'info');
-      el('extra').innerHTML = `<details open><summary>Teste de mesa (x = ${n})</summary>${traceTable(task.code, r.trace, r.output)}</details>`;
+      el('extra').innerHTML = `<details open><summary>Teste de mesa (x = ${n})</summary>${traceTable(task.code, r.trace, r.output)}</details>` + changedFiles(r.files);
     } else {
       if (!Number.isInteger(n) || n < 0 || n > 30) { setFeedback('Usa um inteiro de 0 a 30.', 'bad'); return; }
       setFeedback('Saída: ' + task.run[n] + cmp, 'info');
@@ -1038,8 +1645,14 @@ const CONFIG = {
     mark(1);
   }
 
+  function changedFiles(after) {
+    if (!after) return '';
+    const before = task.files || {}, ch = {};
+    Object.keys(after).forEach(k => { if (before[k] !== after[k]) ch[k] = after[k]; });
+    return Object.keys(ch).length ? '<div class="filesout">' + filesHTML(ch, 'Ficheiro depois da execução', true) + '</div>' : '';
+  }
   function create(src) {
-    const r = Lab.check(src, lang(), task.tests);
+    const r = Lab.check(src, lang(), task.tests, task.files);
     criarTries++; if (!doneArr()[4]) { stat().tentativas++; save(); }
     if (hints >= 2) { el('solution').disabled = false; el('solNote').hidden = true; }
     if (r.compileError) {
@@ -1050,7 +1663,7 @@ const CONFIG = {
     const rows = r.results.map(x => `<tr><td class="mono">${x.input}</td><td class="mono">${Lab.fmtNum(x.expected)}</td><td class="mono">${x.error ? '<span class="fail">Erro' + (x.line ? ' (linha ' + x.line + ')' : '') + ':</span> ' + esc(x.error) : esc(x.output.trim() || '(nada escrito)')}</td><td>${x.pass ? '<span class="pass">✓ Passou</span>' : '<span class="fail">✗ Falhou</span>'}</td></tr>`).join('');
     const focus = r.results.find(x => !x.pass) || r.results[0];
     el('extra').innerHTML = `<div class="tablewrap"><table><thead><tr><th>Entrada</th><th>Esperado</th><th>O teu programa escreveu</th><th>Resultado</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <details${r.ok ? '' : ' open'}><summary>Teste de mesa do teu programa (entrada ${focus.input})</summary>${traceTable(src, focus.trace, focus.output)}</details>`;
+      <details${r.ok ? '' : ' open'}><summary>Teste de mesa do teu programa (entrada ${focus.input})</summary>${traceTable(src, focus.trace, focus.output)}</details>` + changedFiles(focus.files);
     if (r.ok) { setFeedback(`Excelente! Passou nos ${passed} testes. Desafio concluído ✓`, 'ok'); mark(4); }
     else setFeedback(`Passou em ${passed} de ${r.results.length} testes. Compara o esperado com o obtido e usa o teste de mesa para encontrar a diferença.` + (r.results.some(x => !x.error && x.got === null) ? ' Lembra-te de escrever o resultado (ESCREVER / cout).' : ''), 'bad');
   }
@@ -1074,8 +1687,9 @@ const CONFIG = {
   };
   el('next').onclick = () => {
     if (stage < 4) { stage++; savePos(); render(); return; }
-    let nu = u, nc = c + 1;
-    if (nc >= data[u][1].length) { nc = 0; nu = (u + 1) % data.length; }
+    const ord = order(u), pos = ord.indexOf(c);
+    let nu = u, nc;
+    if (pos + 1 < ord.length) nc = ord[pos + 1]; else { nu = (u + 1) % data.length; nc = order(nu)[0]; }
     open(nu, nc); savePos();
     el('lab').scrollIntoView({ block: 'start' });
   };
@@ -1085,7 +1699,7 @@ const CONFIG = {
     if (!pool.length) pool = [...Array(n).keys()].filter(i => i !== c);
     open(u, pool[Math.floor(Math.random() * pool.length)]); savePos();
   };
-  el('unit').onchange = () => { open(+el('unit').value, 0); savePos(); };
+  el('unit').onchange = () => { const nu = +el('unit').value; open(nu, order(nu)[0]); savePos(); };
   el('challenge').onchange = () => { open(u, +el('challenge').value); savePos(); };
   let resetTimer = null;
   el('reset').onclick = () => {
@@ -1111,7 +1725,8 @@ const CONFIG = {
     const lines = ['Laboratório de Programação · resumo do progresso', 'Data: ' + new Date().toLocaleString('pt-PT'), ''];
     data.forEach(([uname, tasks], i) => {
       lines.push(uname);
-      tasks.forEach((t, j) => {
+      order(i).forEach(j => {
+        const t = tasks[j];
         const d = S.done[key(i, j)] || [], st = S.stats[key(i, j)];
         const etapas = phases.filter((_, k) => d[k]).map(p => p[0]).join('') || '—';
         const extra = st ? ` · tentativas no Criar: ${st.tentativas} · pistas: ${st.pistas}${st.solucao ? ' · viu a solução' : ''}` : '';
@@ -1135,7 +1750,7 @@ const CONFIG = {
   if (L && data[L.u] && data[L.u][1][L.c]) {
     u = -1; open(L.u, L.c, Math.min(4, L.stage | 0));
     el('ctaStart').textContent = 'Continuar o treino';
-  } else { u = -1; open(0, 0); }
+  } else { u = -1; open(0, order(0)[0]); }
 })();
 
 </script>
